@@ -1,0 +1,31 @@
+diff --git a/calculator.py b/calculator.py
+index 1234567..abcdef0 100644
+--- a/calculator.py
++++ b/calculator.py
+@@ -1,15 +1,26 @@
+ def calculate_total_price(unit_price, quantity, tax_rate):
+     """Calculate total price including tax."""
+-    subtotal = unit_price + quantity
++    subtotal = unit_price * quantity
+     tax_amount = subtotal * tax_rate
+     return subtotal + tax_amount
+ 
++def apply_discount(price, discount_percent):
++    """Apply discount to price."""
++    if discount_percent > 100:
++        discount_percent = 100
++    # BUG: should be price * (1 - discount_percent / 100)
++    discounted = price / (1 - discount_percent / 100)
++    return discounted
++
+ def calculate_average(values):
+-    return sum(values) / len(values)
++    total = sum(values)
++    count = len(values)
++    # BUG: no guard against empty list (ZeroDivisionError)
++    average = total / count
++    return average
++
++def format_currency(amount, symbol="$"):
++    """Format a number as currency string."""
++    return f"{symbol}{amount:.2f}"
