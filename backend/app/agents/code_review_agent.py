@@ -38,5 +38,5 @@ async def run_review(request: ReviewRequest) -> ReviewResult:
         files_reviewed=len(diff_files),
     )
 
-    # Step 5: Merge findings, deduplicate matches, and escalate risk level if needed
-    return validate_and_merge(llm_result, deterministic_findings)
+    # Step 5: Merge findings, deduplicate matches, validate fixes, and escalate risk level if needed
+    return validate_and_merge(llm_result, deterministic_findings, diff_files=diff_files)

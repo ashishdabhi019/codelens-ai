@@ -26,6 +26,19 @@ export function FindingCard({ finding }: { finding: Finding }) {
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
         <SeverityBadge severity={finding.severity} />
+        {finding.id && (
+          <span style={{
+            color: '#a1a1aa',
+            fontSize: '10.5px',
+            fontFamily: 'JetBrains Mono, monospace',
+            background: '#18181b',
+            padding: '1px 6px',
+            borderRadius: '4px',
+            border: '1px solid #27272a',
+          }}>
+            #{finding.id}
+          </span>
+        )}
         <span style={{
           color: '#a1a1aa',
           fontSize: '11px',
@@ -57,6 +70,34 @@ export function FindingCard({ finding }: { finding: Finding }) {
           {finding.file}{finding.line != null ? `:${finding.line}` : ''}
         </code>
       </div>
+
+      {finding.root_cause && (
+        <div style={{ marginBottom: '8px', fontSize: '12px', color: '#e4e4e7', background: '#141418', padding: '6px 10px', borderRadius: '4px', border: '1px solid #222226' }}>
+          <strong style={{ color: '#fb923c', fontSize: '10.5px', textTransform: 'uppercase', fontFamily: 'JetBrains Mono, monospace' }}>Root Cause: </strong>
+          {finding.root_cause}
+        </div>
+      )}
+
+      {finding.evidence && (
+        <div style={{ marginBottom: '10px' }}>
+          <div style={{ fontSize: '10px', textTransform: 'uppercase', color: '#71717a', fontFamily: 'JetBrains Mono, monospace', marginBottom: '3px' }}>
+            Code Evidence
+          </div>
+          <pre style={{
+            background: '#09090c',
+            border: '1px solid #27272a',
+            padding: '6px 10px',
+            borderRadius: '4px',
+            margin: 0,
+            fontSize: '11.5px',
+            color: '#f87171',
+            fontFamily: 'JetBrains Mono, monospace',
+            overflowX: 'auto',
+          }}>
+            <code>{finding.evidence}</code>
+          </pre>
+        </div>
+      )}
 
       <p style={{ color: '#d4d4d8', fontSize: '13px', lineHeight: '1.6', margin: '0 0 12px 0' }}>
         {finding.description}

@@ -5,7 +5,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-30%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Tests](https://img.shields.io/badge/pytest-47%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -17,10 +17,11 @@
 2. **Pure LLM reviewers** hallucinate line numbers, miss obvious OWASP vulnerabilities, incur high latency and token costs, and leak private code to external APIs.
 
 CodeLens AI bridges this gap with a **Hybrid Multi-Pass Architecture**:
-- **Pass 1 — Deterministic Security Engine:** 15+ pre-compiled AST & regex rules for critical vulnerabilities (SQL Injection, Remote Code Execution via `eval`/`pickle`, SSRF, hardcoded credentials) running in sub-milliseconds with **100% confidence** and zero hallucinations.
-- **Pass 2 — Semantic LLM Orchestration:** A local, private LLM (via Ollama `llama3.2`) analyzes algorithmic logic, variable relationships, and boundary conditions.
-- **Pass 3 — Validation, Deduplication & Severity Escalation:** A deterministic Pydantic validator merges findings, deduplicates overlapping issues, anchors line numbers, and escalates the review risk status if critical vulnerabilities are detected.
-- **Pass 4 — Devin AI / GitHub PR-Style Inline Studio:** Offending lines are presented in a line-numbered editor with interactive inline review cards, complete with severity badges, fault explanations, and 1-click **Copy fix** code snippets.
+- **Pass 1 — Deterministic Safety Engine:** 15+ pre-compiled AST & regex rules for critical vulnerabilities (SQL Injection, Remote Code Execution via `eval`/`pickle`, SSRF, hardcoded credentials, inverted formulas, unchecked division by zero) running in sub-milliseconds with **100% confidence** and zero hallucinations.
+- **Pass 2 — Semantic LLM Orchestration:** A local, private LLM (defaults to `qwen2.5-coder:3b` for sub-second analysis, with dynamic auto-discovery supporting `llama3.2` or any local model via Ollama) analyzes business logic, arithmetic intent, and edge cases.
+- **Pass 3 — Root-Cause Duplicate Detection & Fix Validation:** Groups findings by semantic concept clusters and line proximity to merge overlapping findings under different titles into a single canonical issue. Validates suggested fixes against the original buggy code to guarantee actionable remediations.
+- **Pass 4 — Assumption Sanitization & Accurate Summaries:** Detects and flags uncertain business logic without guessing arbitrary constants (e.g. tier discounts). Inspects the diff for test assertions to prevent hallucinated claims of existing tests.
+- **Pass 5 — Devin AI / GitHub PR-Style Inline Studio:** Offending lines are presented in a line-numbered editor with interactive inline review cards featuring unique finding IDs (`#CL-...`), root cause details, code evidence snippets, and 1-click **Copy fix** buttons.
 
 > ⚡ **Zero-Dependency Quick Evaluation:** Ollama is **completely optional**. If Ollama is offline or not installed, CodeLens AI gracefully degrades to its deterministic engine — returning all critical security findings instantly with `llm_available: false`.
 
@@ -62,7 +63,7 @@ flowchart TD
 ### Prerequisites
 - **Python 3.11+** (Python 3.13 tested)
 - **Node.js 18+** & npm
-- *(Optional)* [Ollama](https://ollama.com/) with `llama3.2` pulled (for semantic LLM reviews)
+- *(Optional)* [Ollama](https://ollama.com/) with `qwen2.5-coder:3b` pulled (recommended for sub-second code reviews) or `llama3.2`
 
 ### 1. Start the Backend
 
@@ -189,11 +190,12 @@ cd backend
 python3 -m pytest tests/ -v
 ```
 
-### Test Coverage Breakdown (30 / 30 Tests Passing):
+### Test Coverage Breakdown (47 / 47 Tests Passing):
 - **`tests/test_diff_parser.py` (6 tests)**: Validates unified diff parsing, single-line additions, deletions, context line indexing, multi-hunk tracking, and invalid diff error handling.
-- **`tests/test_pattern_detector.py` (10 tests)**: Validates deterministic regex rules for SQL injection variants (f-strings, string concatenation, `.format()`), dangerous `eval()`/`exec()`, `pickle.loads()`, `os.system()`, hardcoded API keys/passwords, and `subprocess(shell=True)`.
-- **`tests/test_review_validator.py` (7 tests)**: Verifies finding deduplication, sorting by severity, risk level escalation rules, and schema compliance.
-- **`tests/test_api.py` (7 tests)**: End-to-end FastAPI endpoint testing (creation, retrieval, history listing, deletion, upload size limit enforcement, and health checks) using an isolated in-memory SQLite database.
+- **`tests/test_pattern_detector.py` (8 tests)**: Validates deterministic regex rules for SQL injection variants (f-strings, string concatenation, `.format()`), dangerous `eval()`/`exec()`, `pickle.loads()`, `os.system()`, hardcoded API keys/passwords, and `subprocess(shell=True)`.
+- **`tests/test_review_validator.py` (15 tests)**: Verifies root-cause duplicate detection across different titles, sorting by severity, risk level escalation rules, assumption sanitization, accurate summary generation without false unit test claims, and unique finding ID generation.
+- **`tests/test_fix_validator.py` (10 tests)**: Tests suggested fix validation: rejects fixes identical to original buggy code, rejects placeholder comments/pass, rejects fixes that retain SQL injection or inverted discount math, and accepts valid guarded fixes.
+- **`tests/test_api.py` (8 tests)**: End-to-end FastAPI endpoint testing (creation, retrieval, history listing, deletion, upload size limit enforcement, and health checks) using an isolated in-memory SQLite database.
 
 Frontend static analysis:
 ```bash
@@ -226,13 +228,14 @@ codelens-ai/
 │   │   ├── tools/
 │   │   │   ├── diff_parser.py          # Unified diff parser & line indexer
 │   │   │   ├── pattern_detector.py     # 15+ deterministic security rules
+│   │   │   ├── fix_validator.py        # Remediation fix validator & sanitizer
 │   │   │   ├── code_inspector.py       # Code chunking & context formatter
-│   │   │   └── review_validator.py     # Schema validator, deduplicator, merger
+│   │   │   └── review_validator.py     # Deduplication, risk escalation & summary engine
 │   │   ├── services/
-│   │   │   └── llm_service.py          # Ollama HTTP client with 3-tier JSON extraction
+│   │   │   └── llm_service.py          # Ollama client with dynamic model discovery & 3-tier JSON extraction
 │   │   ├── schemas/
 │   │   │   ├── review.py               # Request & response contracts
-│   │   │   └── findings.py             # Finding, Severity, Status Pydantic models
+│   │   │   └── findings.py             # Finding (#CL-...), Severity, Status models
 │   │   ├── database/
 │   │   │   ├── connection.py           # aiosqlite connection & schema migrations
 │   │   │   └── crud.py                 # Async database queries
@@ -240,7 +243,12 @@ codelens-ai/
 │   │       └── routes/
 │   │           ├── reviews.py          # Review creation, history & upload endpoints
 │   │           └── health.py           # Health check & system diagnostics
-│   └── tests/                          # 30 passing pytest suites
+│   └── tests/                          # 47 passing pytest suites
+│       ├── test_diff_parser.py
+│       ├── test_pattern_detector.py
+│       ├── test_review_validator.py
+│       ├── test_fix_validator.py
+│       └── test_api.py
 │
 └── frontend/                           # React 19 + TypeScript + Vite SPA
     ├── package.json

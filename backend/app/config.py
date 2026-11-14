@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     llm_provider: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2"
+    ollama_model: str = "qwen2.5-coder:3b"
     max_diff_size_bytes: int = 500_000
     max_retries: int = 3
     review_timeout_seconds: int = 120

@@ -4,8 +4,8 @@ import { useToast } from '../context/ToastContext';
 
 export function Settings() {
   const toast = useToast();
-  const [model, setModel] = useState('llama3.2');
-  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
+  const [model, setModel] = useState(() => localStorage.getItem('codelens_model') || 'qwen2.5-coder:3b');
+  const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('codelens_ollama_url') || 'http://localhost:11434');
   const [timeout, setTimeout_] = useState('120');
   const [maxSize, setMaxSize] = useState('500000');
   const [saved, setSaved] = useState(false);
@@ -23,6 +23,8 @@ export function Settings() {
   };
 
   const handleSave = () => {
+    localStorage.setItem('codelens_model', model);
+    localStorage.setItem('codelens_ollama_url', ollamaUrl);
     setSaved(true);
     toast.success('Agent runtime preferences saved successfully.', 'Settings Saved');
     setTimeout(() => setSaved(false), 2000);
@@ -61,10 +63,31 @@ export function Settings() {
             LLM INFERENCE PROVIDER
           </span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid #16161b' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid #16161b', flexWrap: 'wrap', gap: '8px' }}>
           <div>
             <div style={{ color: '#ffffff', fontSize: '13px', fontWeight: 600 }}>Model Tag</div>
             <div style={{ color: '#71717a', fontSize: '12px' }}>Local Ollama model tag</div>
+            <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+              {['qwen2.5-coder:3b', 'deepseek-r1:8b', 'llama3.2'].map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setModel(m)}
+                  style={{
+                    background: model === m ? '#1e1e26' : '#101014',
+                    border: `1px solid ${model === m ? '#4ade80' : '#26262e'}`,
+                    color: model === m ? '#4ade80' : '#888892',
+                    fontSize: '11px',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >
+                  {m} {model === m ? '✓' : ''}
+                </button>
+              ))}
+            </div>
           </div>
           <input value={model} onChange={e => setModel(e.target.value)} style={inputStyle} />
         </div>

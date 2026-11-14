@@ -47,3 +47,5 @@ dist/
 # Misc
 *.orig
 *.bak
+DEMO_SCRIPT.txt
+*demo*script*

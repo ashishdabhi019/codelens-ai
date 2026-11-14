@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { submitReview, submitReviewFile, extractErrorMessage } from '../services/api';
+import { submitReview, extractErrorMessage } from '../services/api';
 import type { ReviewRequest } from '../types';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorBanner } from '../components/ErrorBanner';

@@ -4,24 +4,30 @@ import re
 from app.config import settings
 from app.schemas.findings import ReviewResult
 
-REVIEW_PROMPT_TEMPLATE = """You are a senior code reviewer. Analyze the following Git diff and provide a structured code review.
+REVIEW_PROMPT_TEMPLATE = """You are an expert senior code reviewer. Perform a comprehensive, deep code review of the changed code.
 
-RULES:
-- Only report findings that are directly grounded in the submitted code changes
-- Do not invent or assume issues not visible in the diff
-- Be specific about file names and line numbers
-- Focus on: {focus}
+CRITICAL INSTRUCTIONS:
+- Identify ALL logical bugs, incorrect mathematical calculations, division-by-zero errors, missing input validation, incorrect business logic, and security vulnerabilities.
+- For EVERY issue found:
+  * Specify the EXACT 1-based line number in the submitted code where the issue occurs.
+  * Identify the exact root cause of the fault.
+  * Extract the exact evidence line from the submitted code.
+  * Provide a clear explanation of what is wrong and why.
+  * Provide a concrete failure mode or impact scenario (e.g. "Calling calculate_average([]) crashes with ZeroDivisionError").
+  * In "suggested_fix", provide the EXACT corrected code snippet that actually fixes the bug. NEVER return the original buggy code.
+- AVOID UNSUPPORTED ASSUMPTIONS: Do NOT invent business requirements or arbitrary numbers (e.g., do not assume a premium discount should be 10%). If business logic seems uncertain or contradictory, report it as a potential logic discrepancy and explain what requirement needs confirmation. Leave suggested_fix as null if business rules are unconfirmed.
+- ACCURATE SUMMARY & TESTS: NEVER claim unit tests exist unless test functions (e.g. `test_...`, `assert`) are explicitly present in the submitted code. Distinguish missing test coverage clearly.
+- Focus: {focus}
+- Language: {language}
 
-Language: {language}
-
-Code changes:
+Submitted code changes:
 {code_sections}
 
 {additional_instructions}
 
 Respond strictly with valid JSON conforming to this schema:
 {{
-  "summary": "Concise 2-3 sentence overview of the change quality and risks",
+  "summary": "Concise 2-3 sentence overview of change quality, logical errors, and risks",
   "overall_status": "approved | changes_requested | needs_attention",
   "risk_level": "low | medium | high | critical",
   "files_reviewed": <int>,
@@ -31,25 +37,59 @@ Respond strictly with valid JSON conforming to this schema:
       "category": "bug | security | performance | testing | style | maintainability",
       "severity": "critical | high | medium | low",
       "file": "filename.py",
-      "line": <line_number_or_null>,
-      "description": "Clear explanation of the problem",
-      "impact": "Concrete failure mode or security risk",
+      "line": <int>,
+      "root_cause": "Underlying defect or root cause",
+      "evidence": "Exact code line containing the bug",
+      "description": "Clear explanation of the problem and why it fails",
+      "impact": "Concrete failure mode, crash scenario, or security risk",
       "recommendation": "Prescriptive remediation step",
-      "suggested_fix": "Corrected code snippet or null",
-      "confidence": 0.8
+      "suggested_fix": "Exact replacement code snippet or null",
+      "confidence": 0.9
     }}
   ],
-  "missing_tests": ["Edge cases or test conditions omitted"],
-  "positive_observations": ["Well-implemented patterns in the diff"]
+  "missing_tests": ["Edge cases or test conditions omitted (e.g. empty inputs, negative numbers)"],
+  "positive_observations": ["Well-implemented patterns if any"]
 }}"""
 
 
+async def get_effective_model() -> str:
+    """Finds the best available model on local Ollama, falling back gracefully to any installed model."""
+    try:
+        async with httpx.AsyncClient(timeout=4) as client:
+            resp = await client.get(f"{settings.ollama_base_url}/api/tags")
+            if resp.status_code == 200:
+                available = [m.get("name", "") for m in resp.json().get("models", [])]
+                # Priority 1: qwen2.5-coder:3b (fastest, high-precision code review model)
+                for name in available:
+                    if "qwen2.5-coder" in name:
+                        return name
+                # Priority 2: Configured model
+                for name in available:
+                    if settings.ollama_model in name or name in settings.ollama_model:
+                        return name
+                # Priority 3: Any available local model (e.g. deepseek-r1:8b, llama3.2)
+                if available:
+                    return available[0]
+    except Exception:
+        pass
+    return settings.ollama_model
+
+
 async def call_ollama(prompt: str) -> str:
-    """Calls local Ollama generation endpoint."""
+    """Calls local Ollama generation endpoint with JSON grammar enforcement."""
+    model_name = await get_effective_model()
     async with httpx.AsyncClient(timeout=settings.review_timeout_seconds) as client:
         response = await client.post(
             f"{settings.ollama_base_url}/api/generate",
-            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
+            json={
+                "model": model_name,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {
+                    "temperature": 0.1,
+                },
+            },
         )
         response.raise_for_status()
         return response.json()["response"]

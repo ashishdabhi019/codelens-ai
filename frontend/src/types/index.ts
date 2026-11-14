@@ -1,9 +1,12 @@
 export interface Finding {
+  id?: string;
   title: string;
   category: 'bug' | 'security' | 'performance' | 'testing' | 'style' | 'maintainability';
   severity: 'critical' | 'high' | 'medium' | 'low';
   file: string;
   line?: number;
+  root_cause?: string;
+  evidence?: string;
   description: string;
   impact: string;
   recommendation: string;

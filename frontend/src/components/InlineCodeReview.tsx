@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { Finding } from '../types';
 import { SeverityBadge } from './SeverityBadge';
-import { Copy, Check, FileCode2, Sparkles, AlertTriangle, ShieldAlert, Bug, Zap, CheckCircle2 } from 'lucide-react';
+import { Copy, Check, FileCode2 } from 'lucide-react';
 
 const TOKEN_REGEX = /(#[^\n]*|\/\/[^\n]*)|(f?"""[\s\S]*?"""|f?'''[\s\S]*?'''|f?"(?:\\.|[^"\\])*"|f?'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:def|class|function|async|await|return|yield|import|from|as|export|default|const|let|var|type|interface|package|func)\b)|(\b(?:if|elif|else|for|while|try|except|finally|with|match|case|switch|break|continue|throw|raise)\b)|(\b(?:and|or|not|in|is)\b)|(\b(?:int|str|float|bool|list|dict|set|tuple|void|number|string|boolean|any|unknown|never)\b)|(\b(?:True|False|None|true|false|null|undefined|nil)\b)|(\b[A-Z][a-zA-Z0-9_]*\b)|(\b(?:self|this)\b)|(\b\d+(?:\.\d+)?\b)|(\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\())/g;
 
@@ -223,6 +223,19 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {finding.id && (
+              <span style={{
+                color: '#8b949e',
+                fontSize: '10.5px',
+                fontFamily: "'JetBrains Mono', monospace",
+                background: '#1c2128',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                border: '1px solid #30363d',
+              }}>
+                #{finding.id}
+              </span>
+            )}
             <span style={{
               color: '#8b949e',
               fontSize: '10.5px',
@@ -253,6 +266,21 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
             <span style={{ color: accentColor }}>●</span>
             <span>{finding.title}</span>
           </div>
+
+          {finding.root_cause && (
+            <div style={{
+              marginBottom: '10px',
+              fontSize: '12px',
+              color: '#e6edf3',
+              background: '#161b22',
+              padding: '6px 10px',
+              borderRadius: '4px',
+              border: '1px solid #30363d',
+            }}>
+              <strong style={{ color: '#fb923c', fontSize: '10.5px', textTransform: 'uppercase', fontFamily: "'JetBrains Mono', monospace" }}>Root Cause: </strong>
+              {finding.root_cause}
+            </div>
+          )}
 
           {/* Description */}
           <div style={{
