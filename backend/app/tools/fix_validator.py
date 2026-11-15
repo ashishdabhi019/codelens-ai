@@ -39,8 +39,14 @@ def validate_suggested_fix(
     # Rule 1: Never return the original buggy code as the recommended fix
     if original_code:
         norm_orig = normalize_code(original_code)
-        if norm_orig and (norm_fix == norm_orig or norm_fix in norm_orig or norm_orig in norm_fix):
-            return None, "Suggested fix is identical or equivalent to the original buggy code."
+        if norm_orig:
+            if norm_fix == norm_orig or norm_fix in norm_orig:
+                return None, "Suggested fix is identical or equivalent to the original buggy code."
+            if norm_orig in norm_fix:
+                added_content = norm_fix.replace(norm_orig, "").strip()
+                # If no substantial logic (like guards, checks, error handling) was added
+                if not any(kw in added_content.lower() for kw in ("if", "try", "except", "raise", "assert", "while", "else", "elif")):
+                    return None, "Suggested fix is identical or equivalent to the original buggy code."
 
     # Rule 2: Reject placeholder comments or empty stubs
     for pat in PLACEHOLDER_PATTERNS:

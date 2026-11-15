@@ -272,13 +272,15 @@ def validate_and_merge(
 
         orig_code = line_map.get((f.file, f.line or 0)) if f.line else None
 
-        # If line points to a comment line, advance to the next code statement
-        if f.line and orig_code and (orig_code.strip().startswith("#") or not orig_code.strip()):
-            next_code = line_map.get((f.file, f.line + 1))
-            if next_code and not next_code.strip().startswith("#"):
-                f.line = f.line + 1
-                orig_code = next_code
-                f.evidence = next_code.strip()
+        # If line points to a comment line or blank line, advance to the next executable statement
+        if f.line and (not orig_code or not orig_code.strip() or orig_code.strip().startswith("#")):
+            for offset in (1, 2, 3):
+                next_code = line_map.get((f.file, f.line + offset))
+                if next_code and next_code.strip() and not next_code.strip().startswith("#"):
+                    f.line = f.line + offset
+                    orig_code = next_code
+                    f.evidence = next_code.strip()
+                    break
 
         # Drop findings that describe a bug in removed code that the author already fixed in this diff
         if diff_files and f.line:

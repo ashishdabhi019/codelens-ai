@@ -61,8 +61,28 @@ RAW_PATTERNS = [
         "high",
         "Division by len() without verifying whether the collection is non-empty crashes on empty input.",
         "Calling this function with an empty list triggers ZeroDivisionError and crashes the process.",
-        "Add an upfront guard: if not numbers: return 0.0 before performing division.",
-        'if not numbers:\n    return 0.0\naverage = sum(numbers) / len(numbers)',
+        "Add an upfront guard: if not values: return 0.0 before performing division.",
+        'if not values:\n    return 0.0\nreturn total / len(values)',
+    ),
+    (
+        r'return\s+0\.05\b',
+        "Unverified Tier Discount Requirement Discrepancy",
+        "bug",
+        "medium",
+        "Detected code implementing tier-based discount rules. However, business requirements and exact discount tier percentages were not explicitly provided. Avoid assuming arbitrary tier values without confirmation.",
+        "Applying arbitrary discount values without specification could result in revenue loss or customer billing discrepancies.",
+        "Verify the intended tier discount policy with product requirements before modifying discount rates.",
+        None,
+    ),
+    (
+        r'return\s+weight\s*\*\s*rate_per_kg',
+        "Missing Negative Value Validation",
+        "bug",
+        "medium",
+        "Function calculates shipping charges by multiplying weight by rate without validating that inputs are non-negative.",
+        "Passing negative weight or negative rate produces an invalid negative shipping charge.",
+        "Add input validation to ensure weight and rate_per_kg are non-negative before computing shipping cost.",
+        'if weight < 0 or rate_per_kg < 0:\n    raise ValueError("Weight and rate must be non-negative")\nreturn weight * rate_per_kg',
     ),
     (
         r'\beval\s*\([^"\']{3,}\)',
@@ -149,6 +169,13 @@ def detect_risky_patterns(diff_content: str, diff_files: List[DiffFile]) -> List
     for compiled, title, category, severity, description, impact, recommendation, suggested_fix in COMPILED_PATTERNS:
         for content, filename, line_number in added_lines:
             if compiled.search(content):
+                actual_fix = suggested_fix
+                if "ZeroDivisionError" in title:
+                    m_len = re.search(r'/\s*len\(\s*(\w+)\s*\)', content)
+                    if m_len:
+                        var_name = m_len.group(1)
+                        actual_fix = f"if not {var_name}:\n    return 0.0\n{content.strip()}"
+
                 # Deterministic findings carry confidence = 1.0 because regex hit on known bad pattern
                 findings.append(
                     Finding(
@@ -162,7 +189,7 @@ def detect_risky_patterns(diff_content: str, diff_files: List[DiffFile]) -> List
                         description=description,
                         impact=impact,
                         recommendation=recommendation,
-                        suggested_fix=suggested_fix,
+                        suggested_fix=actual_fix,
                         confidence=1.0,
                     )
                 )

@@ -352,33 +352,38 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
           </div>
 
           {/* Current Faulty Code Line */}
-          {(finding.evidence || (finding.line != null && targetLineMap.get(finding.line))) && (
-            <div style={{ marginBottom: '12px' }}>
-              <div style={{
-                fontSize: '11px',
-                fontWeight: 600,
-                color: '#8b949e',
-                marginBottom: '5px',
-                fontFamily: "'Inter', sans-serif",
-              }}>
-                Current code:
+          {(() => {
+            const rawCode = finding.evidence || (finding.line != null ? targetLineMap.get(finding.line) : null);
+            const currentCodeText = rawCode?.trim();
+            if (!currentCodeText) return null;
+            return (
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#8b949e',
+                  marginBottom: '5px',
+                  fontFamily: "'Inter', sans-serif",
+                }}>
+                  Current code:
+                </div>
+                <div style={{
+                  background: '#0a0d12',
+                  border: '1px solid #30363d',
+                  borderLeft: '3px solid #f87171',
+                  borderRadius: '5px',
+                  padding: '9px 12px',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: '12px',
+                  color: '#f87171',
+                  overflowX: 'auto',
+                  whiteSpace: 'pre',
+                }}>
+                  {rawCode}
+                </div>
               </div>
-              <div style={{
-                background: '#0a0d12',
-                border: '1px solid #30363d',
-                borderLeft: '3px solid #f87171',
-                borderRadius: '5px',
-                padding: '9px 12px',
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: '12px',
-                color: '#f87171',
-                overflowX: 'auto',
-                whiteSpace: 'pre',
-              }}>
-                {finding.evidence || targetLineMap.get(finding.line!)}
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Recommended Fix */}
           {finding.suggested_fix && (

@@ -84,7 +84,7 @@ class UserService:
   {
     key: 'bug',
     title: 'Calculation Logic Bug',
-    tagline: 'Inverted discount rate formula & unchecked division operation',
+    tagline: 'Inverted discount rate formula, unchecked division, tier assumptions & negative bounds',
     focus: 'bugs',
     language: 'Python',
     filename: 'calculator.py',
@@ -92,22 +92,28 @@ class UserService:
     badgeColor: '#f59e0b',
     badgeBg: 'rgba(245, 158, 11, 0.12)',
     icon: Bug,
-    content: `def calculate_total_price(unit_price, quantity, tax_rate):
--    subtotal = unit_price + quantity
-+    subtotal = unit_price * quantity
-    tax_amount = subtotal * tax_rate
-    return subtotal + tax_amount
-
-+def apply_discount(price, discount_percent):
-+    # Inverted discount division
-+    discounted = price / (1 - discount_percent / 100)
-+    return discounted
+    content: `def calculate_discount(price, discount_percent):
+    # Inverted discount formula
+    discounted = price / (1 - discount_percent / 100)
+    return discounted
 
 def calculate_average(values):
--    return sum(values) / len(values)
-+    total = sum(values)
-+    count = len(values)
-+    return total / count`,
+    # Empty collection crash
+    total = sum(values)
+    return total / len(values)
+
+def get_tier_discount(user_type):
+    # Tier discount discrepancy without business specification
+    if user_type == "premium":
+        return 0.05
+    return 0.0
+
+def calculate_shipping(weight, rate_per_kg):
+    # Missing negative value validation
+    if weight == 0:
+        return 0.0
+    # Negative weight or rate leads to invalid negative cost
+    return weight * rate_per_kg`,
   },
   {
     key: 'tests',

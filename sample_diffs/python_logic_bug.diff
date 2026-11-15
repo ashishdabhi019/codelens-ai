@@ -2,30 +2,26 @@ diff --git a/calculator.py b/calculator.py
 index 1234567..abcdef0 100644
 --- a/calculator.py
 +++ b/calculator.py
-@@ -1,15 +1,26 @@
- def calculate_total_price(unit_price, quantity, tax_rate):
-     """Calculate total price including tax."""
--    subtotal = unit_price + quantity
-+    subtotal = unit_price * quantity
-     tax_amount = subtotal * tax_rate
-     return subtotal + tax_amount
- 
-+def apply_discount(price, discount_percent):
-+    """Apply discount to price."""
-+    if discount_percent > 100:
-+        discount_percent = 100
-+    # BUG: should be price * (1 - discount_percent / 100)
+@@ -1,22 +1,22 @@
++def calculate_discount(price, discount_percent):
++    # Inverted discount formula
 +    discounted = price / (1 - discount_percent / 100)
 +    return discounted
 +
- def calculate_average(values):
--    return sum(values) / len(values)
++def calculate_average(values):
++    # Empty collection crash
 +    total = sum(values)
-+    count = len(values)
-+    # BUG: no guard against empty list (ZeroDivisionError)
-+    average = total / count
-+    return average
++    return total / len(values)
 +
-+def format_currency(amount, symbol="$"):
-+    """Format a number as currency string."""
-+    return f"{symbol}{amount:.2f}"
++def get_tier_discount(user_type):
++    # Tier discount discrepancy without business specification
++    if user_type == "premium":
++        return 0.05
++    return 0.0
++
++def calculate_shipping(weight, rate_per_kg):
++    # Missing negative value validation
++    if weight == 0:
++        return 0.0
++    # Negative weight or rate leads to invalid negative cost
++    return weight * rate_per_kg
