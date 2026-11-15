@@ -7,7 +7,15 @@ from app.schemas.findings import ReviewResult
 REVIEW_PROMPT_TEMPLATE = """You are an expert senior code reviewer. Perform a comprehensive, deep code review of the changed code.
 
 CRITICAL INSTRUCTIONS:
-- Identify ALL logical bugs, incorrect mathematical calculations, division-by-zero errors, missing input validation, incorrect business logic, and security vulnerabilities.
+- Identify ALL logical bugs, incorrect mathematical calculations, division-by-zero errors, missing input validation, incorrect business logic, and security vulnerabilities across ANY programming language.
+- UNIVERSAL MULTI-LANGUAGE PROFICIENCY:
+  * Review code in any language (Python, TypeScript, JavaScript, Go, Java, C/C++, Rust, PHP, C#, Ruby, SQL).
+  * Apply language-specific security and correctness standards:
+    - JavaScript/TypeScript: DOM XSS (e.g. innerHTML), template literal SQL injection, unhandled promise rejections, sort() without comparator, prototype pollution.
+    - Go: Unchecked error returns, nil pointer dereferences, goroutine/channel leaks, race conditions.
+    - Java: Resource leaks (missing try-with-resources), SQL string concatenation, NullPointerExceptions.
+    - C/C++: Buffer overflows (strcpy, sprintf, gets), memory leaks, pointer mismanagement, integer overflows.
+    - Python: ZeroDivisionError, mutable default arguments, f-string SQLi, command injection, resource leaks.
 - REVIEW RESULTING CODE, NOT SOLVED BUGS IN DELETED LINES:
   * In git diffs, lines marked with '-' are DELETED OLD CODE.
   * If the developer fixed an old bug by deleting a '-' line and replacing it with a '+' line (for example, replacing subtotal addition with multiplication), DO NOT report it as an active bug! It is already fixed by the author.

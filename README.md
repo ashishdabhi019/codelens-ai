@@ -5,7 +5,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-47%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Tests](https://img.shields.io/badge/pytest-53%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -103,7 +103,7 @@ To test the application immediately without crafting unified diffs, click any of
 | Scenario | Target File | What It Tests | Expected Output |
 | :--- | :--- | :--- | :--- |
 | **SQL Injection & RCE** | `user_service.py` | Raw f-string query in `cursor.execute()`, hardcoded `DB_PASSWORD`, and `eval(filter_expr)` | **CRITICAL RISK** (`Changes Requested`) — 3 deterministic security findings with 1-click parameterized query remediations |
-| **Calculation Logic Bug** | `calculator.py` | Inverted discount formula `price / (1 - discount/100)`, division-by-zero risk in `calculate_average()` | **HIGH / MEDIUM RISK** — Logic bug warnings with corrected calculation snippets |
+| **Calculation Logic Bug** | `calculator.py` | Inverted discount formula `price / (1 - discount/100)`, unchecked division risk in `calculate_average()`, unverified tier discount rate, and missing negative value validation | **HIGH / MEDIUM RISK** — 4 prioritized findings with copyable fixes, safe division guards, tier assumption warnings, and negative value bounds |
 | **Missing Boundary Tests** | `math_utils.py` | `calculate_median()` with no test coverage for empty arrays, single elements, or even-length inputs | **TEST COVERAGE** — Prescriptive unit test suggestions for boundary edge cases |
 
 ---

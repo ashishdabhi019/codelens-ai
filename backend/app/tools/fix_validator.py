@@ -66,6 +66,10 @@ def validate_suggested_fix(
             return None, "Suggested fix still passes an unparameterized f-string to execute()."
         if re.search(r'\.execute\(.*?\.format\(', cleaned_fix, re.IGNORECASE):
             return None, "Suggested fix still uses string .format() inside execute() instead of parameters."
+        if re.search(r'`\s*(?:SELECT|INSERT|UPDATE|DELETE|DROP|ALTER)\b.*?\$\{', cleaned_fix, re.IGNORECASE):
+            return None, "Suggested fix still uses template string interpolation in SQL query instead of parameterized query."
+        if re.search(r'["\']\s*(?:SELECT|INSERT|UPDATE|DELETE|DROP|ALTER)\b.*?\+\s*\w+', cleaned_fix, re.IGNORECASE):
+            return None, "Suggested fix still uses string concatenation in SQL query instead of parameters."
 
     # 3b. Inverted discount formula: fix must not divide by (1 - discount/100)
     if "discount" in lower_title or "discount" in lower_desc:
@@ -74,16 +78,23 @@ def validate_suggested_fix(
 
     # 3c. ZeroDivision / Empty collection: fix must guard against empty collection
     if "zerodivision" in lower_title or "empty" in lower_desc or "zerodivision" in lower_desc:
-        if re.search(r'/\s*len\(', cleaned_fix):
-            if not re.search(r'\b(?:if|try|except)\b', cleaned_fix):
-                return None, "Suggested fix performs division by len() without an upfront empty check or guard."
+        if re.search(r'/\s*(?:len\(|\.length\b)', cleaned_fix):
+            if not re.search(r'\b(?:if|try|except|catch)\b', cleaned_fix):
+                return None, "Suggested fix performs division by collection size without an upfront empty check or guard."
 
     # 3d. Unsafe eval/exec: fix must not call eval() or exec() with variable arguments
     if "eval" in lower_title or "eval" in lower_desc:
         if re.search(r'\beval\s*\([^"\']{3,}\)', cleaned_fix):
             return None, "Suggested fix still uses unsafe eval() on variable input."
+        if re.search(r'\bnew\s+Function\s*\(', cleaned_fix):
+            return None, "Suggested fix still uses dynamic Function constructor on untrusted input."
     if "exec" in lower_title or "exec" in lower_desc:
         if re.search(r'\bexec\s*\([^"\']{3,}\)', cleaned_fix):
             return None, "Suggested fix still uses unsafe exec() on variable input."
+
+    # 3e. Cross-Site Scripting (XSS): fix must not assign raw unescaped input to innerHTML
+    if "xss" in lower_title or "xss" in lower_desc:
+        if re.search(r'\.(?:innerHTML|outerHTML)\s*=\s*(?:`[^`]*\$\{|\w+)', cleaned_fix):
+            return None, "Suggested fix still assigns unsanitized variable directly to innerHTML instead of textContent or sanitization."
 
     return cleaned_fix, None
