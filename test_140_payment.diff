@@ -1,0 +1,144 @@
+diff --git a/code.py b/code.py
+--- a/code.py
++++ b/code.py
+@@ -1,140 +1,140 @@
++
++import os
++import sqlite3
++import pickle
++import requests
++import hashlib
++
++
++DB_PATH = "payments.db"
++API_SECRET = "sk_live_123456789abcdef"
++
++
++def get_user(user_id):
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++
++    query = f"SELECT id, name, balance FROM users WHERE id = {user_id}"
++    cursor.execute(query)
++
++    user = cursor.fetchone()
++    conn.close()
++    return user
++
++
++def transfer_money(sender_id, receiver_id, amount):
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++
++    sender = cursor.execute(
++        "SELECT balance FROM accounts WHERE id = ?",
++        (sender_id,)
++    ).fetchone()
++
++    if not sender:
++        return {"error": "Sender not found"}
++
++    if amount <= 0:
++        return {"error": "Invalid amount"}
++
++    if sender[0] >= amount:
++        cursor.execute(
++            "UPDATE accounts SET balance = balance - ? WHERE id = ?",
++            (amount, sender_id)
++        )
++
++        cursor.execute(
++            "UPDATE accounts SET balance = balance + ? WHERE id = ?",
++            (amount, receiver_id)
++        )
++
++        conn.commit()
++
++    conn.close()
++    return {"status": "success"}
++
++
++def calculate_discount(price, discount):
++    if discount > 100:
++        discount = 100
++
++    final_price = price * (discount / 100)
++    return final_price
++
++
++def calculate_average(numbers):
++    total = sum(numbers)
++    return total / len(numbers)
++
++
++def load_user_data(data):
++    return pickle.loads(data)
++
++
++def evaluate_expression(expression):
++    return eval(expression)
++
++
++def download_profile_image(image_url, user_id):
++    response = requests.get(image_url)
++    file_path = f"/var/www/uploads/{user_id}.jpg"
++
++    with open(file_path, "wb") as image:
++        image.write(response.content)
++
++    return file_path
++
++
++def reset_password(user_id, new_password):
++    hashed_password = hashlib.md5(new_password.encode()).hexdigest()
++
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++
++    cursor.execute(
++        "UPDATE users SET password = ? WHERE id = ?",
++        (hashed_password, user_id)
++    )
++
++    conn.commit()
++    conn.close()
++
++    return True
++
++
++def send_webhook(webhook_url, payment_data):
++    return requests.post(
++        webhook_url,
++        json=payment_data,
++        timeout=5
++    )
++
++
++def get_api_secret():
++    return os.getenv("PAYMENT_API_SECRET")
++
++
++def safe_user_lookup(user_id):
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++
++    cursor.execute(
++        "SELECT id, name FROM users WHERE id = ?",
++        (user_id,)
++    )
++
++    result = cursor.fetchone()
++    conn.close()
++
++    return result
++
++
++def process_refund(amount, refund_percentage):
++    if amount < 0:
++        raise ValueError("Amount cannot be negative")
++
++    if not 0 <= refund_percentage <= 100:
++        raise ValueError("Invalid refund percentage")
++
++    return amount * refund_percentage / 100
++

@@ -1,4 +1,5 @@
 import os
+import ast
 import re
 from typing import List, Optional, Set, Dict, Tuple
 from app.schemas.findings import Finding, ReviewResult
@@ -159,22 +160,207 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
     return finding
 
 
+def _get_enclosing_ast_function(full_code: str, line: Optional[int]) -> Optional[ast.AST]:
+    """Finds the innermost AST function or async function node containing the given line number."""
+    if not line or not full_code:
+        return None
+    try:
+        tree = ast.parse(full_code)
+        target_fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                end_lineno = getattr(node, "end_lineno", node.lineno + 100)
+                if node.lineno <= line <= end_lineno:
+                    if target_fn is None or (node.lineno >= target_fn.lineno and end_lineno <= getattr(target_fn, "end_lineno", 10000)):
+                        target_fn = node
+        return target_fn
+    except Exception:
+        return None
+
+
+def _verify_vulnerability_claim(
+    finding: Finding,
+    actual_code: str,
+    lines_in_file: Dict[int, str],
+    full_code: str,
+    file_path: str,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Verifies that the claimed vulnerability type is semantically supported
+    by the code at the reported location and its enclosing function/scope.
+    """
+    claim_text = f"{finding.title} {finding.description} {finding.root_cause or ''}".lower()
+    title_lower = finding.title.lower()
+    rc_lower = (finding.root_cause or "").lower()
+    is_python = file_path.endswith(".py") or "python" in file_path.lower()
+    fn_node = _get_enclosing_ast_function(full_code, finding.line) if is_python else None
+
+    # 1. SQL Injection Verification
+    if "sql injection" in title_lower or "sqli" in title_lower or "sql injection" in rc_lower:
+        if is_python and fn_node is not None:
+            # 1a. Check if enclosing function contains ANY database calls or SQL keywords
+            all_calls = [n for n in ast.walk(fn_node) if isinstance(n, ast.Call)]
+            has_db_calls = False
+            for call in all_calls:
+                func_name = ""
+                if isinstance(call.func, ast.Name):
+                    func_name = call.func.id.lower()
+                elif isinstance(call.func, ast.Attribute):
+                    func_name = call.func.attr.lower()
+                if func_name in ("execute", "executemany", "raw", "select", "query", "cursor", "connect"):
+                    has_db_calls = True
+                    break
+
+            sql_kw_regex = re.compile(
+                r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE\s+TABLE)\b', re.IGNORECASE
+            )
+            fn_source = ast.unparse(fn_node) if hasattr(ast, "unparse") else ""
+            has_sql_keywords = bool(sql_kw_regex.search(fn_source))
+
+            if not has_db_calls and not has_sql_keywords:
+                return False, f"SQL injection finding rejected: function at line {finding.line} contains no SQL queries or database operations."
+
+            # 1b. Check if dynamic query construction exists in this function
+            has_dynamic_sql = False
+            for n in ast.walk(fn_node):
+                if isinstance(n, ast.JoinedStr):
+                    joined_str_repr = ast.unparse(n) if hasattr(ast, "unparse") else ""
+                    if sql_kw_regex.search(joined_str_repr) and any(isinstance(v, ast.FormattedValue) for v in n.values):
+                        has_dynamic_sql = True
+                        break
+                elif isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Mod)):
+                    bin_repr = ast.unparse(n) if hasattr(ast, "unparse") else ""
+                    if sql_kw_regex.search(bin_repr):
+                        has_dynamic_sql = True
+                        break
+                elif isinstance(n, ast.Call):
+                    if isinstance(n.func, ast.Attribute) and n.func.attr == "format":
+                        fmt_repr = ast.unparse(n) if hasattr(ast, "unparse") else ""
+                        if sql_kw_regex.search(fmt_repr):
+                            has_dynamic_sql = True
+                            break
+
+            # 1c. If no dynamic SQL construction, check if execute calls are parameterized
+            if not has_dynamic_sql:
+                exec_calls = [
+                    c for c in all_calls
+                    if isinstance(c.func, ast.Attribute) and c.func.attr in ("execute", "executemany")
+                ]
+                if exec_calls:
+                    all_safe_params = True
+                    for ec in exec_calls:
+                        if not ec.args:
+                            continue
+                        first_arg = ec.args[0]
+                        # Safe if first argument is a literal string with ?, %s, or $1 placeholders
+                        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                            if re.search(r'(\?|%s|\$1)', first_arg.value):
+                                if len(ec.args) >= 2 or ec.keywords:
+                                    continue
+                        all_safe_params = False
+                        break
+                    if all_safe_params:
+                        return False, f"SQL injection finding rejected: all queries in function at line {finding.line} use safe parameterized placeholders."
+        else:
+            context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-5, 6)]) if finding.line else actual_code
+            sql_kw = re.search(r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER)\b', context, re.IGNORECASE)
+            db_call = re.search(r'\b(query|execute|raw|db\.|pool\.|tx\.)\b', context, re.IGNORECASE)
+            if not sql_kw and not db_call:
+                return False, f"SQL injection finding rejected: code at line {finding.line} contains no SQL or database operations."
+            # Check for parameterized queries in other languages
+            if re.search(r'\.query\(\s*["\'][^"\']*\$(?:1|\?)[^"\']*["\']\s*,\s*\[', context):
+                return False, f"SQL injection finding rejected: query uses safe parameterized placeholders."
+
+    # 2. ZeroDivisionError Verification
+    if "zerodivision" in claim_text or "division by zero" in claim_text or "divide by zero" in claim_text:
+        if is_python:
+            target_node = fn_node
+            if target_node is None and actual_code:
+                try:
+                    target_node = ast.parse(actual_code)
+                except Exception:
+                    pass
+            if target_node is not None:
+                div_nodes = [n for n in ast.walk(target_node) if isinstance(n, (ast.Div, ast.FloorDiv, ast.Mod))]
+                if not div_nodes:
+                    return False, f"ZeroDivisionError finding rejected: code at line {finding.line} does not contain division or modulus operations."
+                all_div_safe = True
+                for parent in ast.walk(target_node):
+                    if isinstance(parent, ast.BinOp) and isinstance(parent.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                        if isinstance(parent.right, ast.Constant) and isinstance(parent.right.value, (int, float)) and parent.right.value != 0:
+                            continue
+                        all_div_safe = False
+                        break
+                if all_div_safe and div_nodes:
+                    return False, f"ZeroDivisionError finding rejected: denominator is a non-zero literal constant."
+        else:
+            context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]) if finding.line else actual_code
+            has_division = bool(re.search(r'/(?!/|\*)|\bdiv\b|%', context))
+            if not has_division:
+                return False, f"ZeroDivisionError finding rejected: code at line {finding.line} does not contain division."
+            literal_denom = re.search(r'/\s*([0-9]+(?:\.[0-9]+)?)\b', actual_code)
+            if literal_denom and float(literal_denom.group(1)) != 0.0:
+                return False, f"ZeroDivisionError finding rejected: denominator is non-zero literal {literal_denom.group(1)}."
+
+    # 3. Dangerous eval/exec Verification
+    is_eval_claim = bool(re.search(r'\b(?:eval|exec)\b', title_lower)) or "arbitrary code execution" in title_lower or "code injection" in title_lower
+    if is_eval_claim:
+        context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]) if finding.line else actual_code
+        if "literal_eval" in context and "ast.literal_eval" in context:
+            return False, "eval finding rejected: ast.literal_eval is safe."
+        if not re.search(r'\b(?:eval|exec)\s*\(', context):
+            return False, f"eval finding rejected: no eval/exec call at line {finding.line}."
+
+    # 4. Hardcoded Credential Verification
+    is_cred_claim = any(k in title_lower for k in ("hardcoded", "credential", "secret", "api_key")) or any(k in rc_lower for k in ("hardcoded", "credential", "secret", "api_key"))
+    if is_cred_claim:
+        context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-1, 2)]) if finding.line else actual_code
+        if any(env_kw in context for env_kw in ("os.getenv(", "os.environ", "environ.get(", "process.env", "System.getenv", "os.Getenv")):
+            return False, f"Hardcoded credential finding rejected: reading from environment variable."
+
+    # 5. Unsafe Pickle Deserialization Verification
+    is_pickle_claim = "pickle" in title_lower or "deserialization" in title_lower or "pickle" in rc_lower
+    if is_pickle_claim:
+        context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]) if finding.line else actual_code
+        if not re.search(r'\b(?:pickle|_pickle)\.(?:load|loads)\b', context):
+            return False, f"pickle finding rejected: no pickle operations at line {finding.line}."
+
+    # 6. SSRF Verification
+    is_ssrf_claim = "ssrf" in title_lower or "server-side request forgery" in title_lower or "ssrf" in rc_lower
+    if is_ssrf_claim:
+        context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]) if finding.line else actual_code
+        if not re.search(r'\b(?:requests|httpx|urllib|fetch|http)\.(?:get|post|put|delete|patch|request)\b', context, re.IGNORECASE):
+            return False, f"SSRF finding rejected: no HTTP client request at line {finding.line}."
+
+    # 7. Path Traversal Verification
+    is_path_claim = "path traversal" in title_lower or "directory traversal" in title_lower or "path traversal" in rc_lower
+    if is_path_claim:
+        context = " ".join([lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]) if finding.line else actual_code
+        if not re.search(r'\b(?:open|readFile|writeFile|createReadStream|os\.remove|os\.unlink|Path)\b', context):
+            return False, f"Path traversal finding rejected: no file operation at line {finding.line}."
+
+    return True, None
+
+
 def validate_source_evidence(
     finding: Finding,
     diff_files: Optional[List[DiffFile]],
     file_lines: Dict[str, Dict[int, str]],
     file_all_code: Dict[str, str],
+    seen_evidence: Optional[Dict[str, Tuple[int, str]]] = None,
 ) -> Tuple[bool, Optional[Finding], Optional[str]]:
     """
     Strictly validates finding against actual source code and diff.
     Verifies:
     1. Referenced file exists in diff.
     2. Reported line number exists in file.
-    3. Evidence corresponds to the actual source line.
-    4. Rejects false ZeroDivision claims where no division operator exists or denominator cannot be zero.
-    5. Rejects false SQL injection where query is parameterized.
-    6. Rejects false eval on ast.literal_eval.
-    7. Rejects false credential on os.getenv / environment lookup.
+    3. Evidence corresponds to the actual reported source location (+/- 2 lines).
+       NEVER falls back to searching full_code when line is specified.
+    4. Rejects evidence duplicated from unrelated functions (>3 lines away).
+    5. Rejects false ZeroDivision claims where no division operator exists or denominator cannot be zero.
+    6. Rejects false SQL injection where function contains no SQL or query is parameterized.
+    7. Rejects false eval on ast.literal_eval.
+    8. Rejects false credential on os.getenv / environment lookup.
     """
     if not diff_files:
         # If no diff files provided, cannot cross-check diff structure
@@ -199,91 +385,76 @@ def validate_source_evidence(
     # Step 2: Line number verification
     if finding.line is not None:
         if finding.line not in lines_in_file:
-            # Check if evidence matches another line in this file
+            # Check if evidence matches a nearby line (+/- 2 lines)
             if finding.evidence and finding.evidence.strip():
                 norm_ev = normalize_code(finding.evidence)
                 matched_line = None
-                for l_num, l_content in lines_in_file.items():
-                    if norm_ev and (norm_ev in normalize_code(l_content) or normalize_code(l_content) in norm_ev):
-                        matched_line = l_num
-                        break
+                for offset in (-2, -1, 1, 2):
+                    candidate = finding.line + offset
+                    if candidate in lines_in_file:
+                        cand_norm = normalize_code(lines_in_file[candidate])
+                        if cand_norm and len(cand_norm) >= 4 and (norm_ev in cand_norm or cand_norm in norm_ev):
+                            matched_line = candidate
+                            break
                 if matched_line:
                     finding.line = matched_line
                 else:
                     return False, None, f"Line {finding.line} does not exist in '{finding.file}' and evidence cannot be verified."
+            else:
+                return False, None, f"Line {finding.line} does not exist in '{finding.file}'."
+    else:
+        # If line is None, try to anchor to evidence
+        if finding.evidence and finding.evidence.strip():
+            norm_ev = normalize_code(finding.evidence)
+            for l_num, l_content in lines_in_file.items():
+                l_norm = normalize_code(l_content)
+                if l_norm and len(l_norm) >= 4 and (norm_ev in l_norm or l_norm in norm_ev):
+                    finding.line = l_num
+                    break
 
-    # Step 3: Evidence verification against actual code
+    # Step 3: Evidence verification against actual code at reported line
     actual_code = lines_in_file.get(finding.line, "") if finding.line else ""
     if finding.evidence and finding.evidence.strip():
         norm_ev = normalize_code(finding.evidence)
         norm_actual = normalize_code(actual_code)
 
-        # Check surrounding +/- 2 lines if line offset slightly
-        if norm_actual and norm_ev not in norm_actual and norm_actual not in norm_ev:
+        # Check if actual line matches; if not, check surrounding +/- 2 lines
+        if not norm_actual or (norm_ev not in norm_actual and norm_actual not in norm_ev):
             nearby_match = False
             if finding.line:
                 for offset in (-2, -1, 1, 2):
                     adj_code = lines_in_file.get(finding.line + offset, "")
-                    if norm_ev in normalize_code(adj_code) or normalize_code(adj_code) in norm_ev:
+                    norm_adj = normalize_code(adj_code)
+                    if norm_adj and len(norm_adj) >= 4 and (norm_ev in norm_adj or norm_adj in norm_ev):
                         finding.line = finding.line + offset
                         actual_code = adj_code
                         nearby_match = True
                         break
-            if not nearby_match and norm_ev not in normalize_code(full_code):
-                # Evidence does not exist in the file at all -> Hallucinated evidence
-                return False, None, f"Evidence '{finding.evidence.strip()}' does not exist in file '{finding.file}'."
+            if not nearby_match:
+                # Evidence does not match reported line or immediate context (+/- 2 lines).
+                # NEVER fallback to searching full_code! Reject immediately!
+                return False, None, f"Evidence '{finding.evidence.strip()}' does not match line {finding.line} in '{finding.file}'."
     elif actual_code:
         # Populate actual evidence from source code (never invent fake code)
         finding.evidence = actual_code.strip()
 
-    # Step 4: Semantic sanity checks on specific vulnerability claims
+    # Step 4: Prevent evidence theft / duplication across unrelated functions
+    if seen_evidence is not None and finding.evidence and finding.line is not None:
+        norm_ev = normalize_code(finding.evidence)
+        if len(norm_ev) >= 20:
+            if norm_ev in seen_evidence:
+                prior_line, prior_id = seen_evidence[norm_ev]
+                if abs(finding.line - prior_line) > 3:
+                    return False, None, f"Finding rejected: evidence is duplicated from line {prior_line} in an unrelated function."
+            else:
+                seen_evidence[norm_ev] = (finding.line, finding.id or "")
 
-    # 4a. ZeroDivisionError verification
-    text = f"{finding.title} {finding.description}".lower()
-    if "zerodivision" in text or "division by zero" in text:
-        context_window = actual_code
-        if finding.line:
-            surrounding = [lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]
-            context_window = " ".join(surrounding)
-
-        # Check if code actually contains division / modulo operators
-        has_division = bool(re.search(r'/(?!/|\*)|\bdiv\b|%', context_window))
-        if not has_division:
-            # Code does NOT divide! E.g. multiplication 'total_spend * 0.125'
-            return False, None, f"ZeroDivisionError finding rejected: code at line {finding.line} does not contain division."
-
-        # Check if denominator is a non-zero literal constant (e.g. / 100, / 2, / 1000)
-        literal_denom = re.search(r'/\s*([0-9]+(?:\.[0-9]+)?)\b', actual_code)
-        if literal_denom and float(literal_denom.group(1)) != 0.0:
-            return False, None, f"ZeroDivisionError finding rejected: denominator is non-zero literal {literal_denom.group(1)}."
-
-        # Check if division is already guarded by an upfront check
-        if any(guard in full_code.lower() for guard in ("if not ", "if len(", "if count ==", "== 0: return", "<= 0: return")):
-            # If the specific function already has a guard on the same variable, reject
-            m_len = re.search(r'/\s*len\(\s*(\w+)\s*\)', actual_code)
-            if m_len:
-                var = m_len.group(1)
-                if f"if not {var}" in full_code or f"len({var}) == 0" in full_code or f"len({var}) <= 0" in full_code:
-                    return False, None, f"ZeroDivisionError finding rejected: guarded against empty {var}."
-
-    # 4b. SQL injection check: do not flag safe parameterized queries
-    if ("sql injection" in text or "sqli" in text) and actual_code:
-        # Parameterized query with placeholders (?, %s, $1) and tuple/list argument
-        is_safe_param = bool(
-            re.search(r'\.execute\(\s*["\'][^"\']*(?:\?|%s|\$1)[^"\']*["\']\s*,\s*(?:\([^)]+\)|\[[^\]]+\]|\w+)\s*\)', actual_code)
-        )
-        has_fstring_or_concat = bool(re.search(r'f["\']|\.format\(|\+\s*\w+', actual_code))
-        if is_safe_param and not has_fstring_or_concat:
-            return False, None, f"SQL injection finding rejected: parameterized query on line {finding.line} is safe."
-
-    # 4c. Eval check: do not flag ast.literal_eval
-    if "eval" in text and "literal_eval" in actual_code and "ast.literal_eval" in actual_code:
-        return False, None, f"eval finding rejected: ast.literal_eval is safe."
-
-    # 4d. Hardcoded credential check: do not flag os.getenv / os.environ
-    if any(k in text for k in ("hardcoded", "credential", "secret", "api_key")) and actual_code:
-        if "os.getenv(" in actual_code or "os.environ" in actual_code or "environ.get(" in actual_code:
-            return False, None, f"Hardcoded credential finding rejected: reading from environment variable."
+    # Step 5: Semantic sanity checks on specific vulnerability claims
+    claim_valid, claim_reason = _verify_vulnerability_claim(
+        finding, actual_code, lines_in_file, full_code, matched_file_key
+    )
+    if not claim_valid:
+        return False, None, claim_reason
 
     return True, finding, None
 
@@ -390,11 +561,12 @@ def validate_and_merge(
     raw_findings = list(deterministic_findings) + list(llm_result.findings)
     merged: List[Finding] = []
     unverified_count = 0
+    seen_evidence: Dict[str, Tuple[int, str]] = {}
 
     for f in raw_findings:
         # Step A: Validate finding against source code and diff
         valid, validated_f, reject_reason = validate_source_evidence(
-            f, diff_files, file_lines, file_all_code
+            f, diff_files, file_lines, file_all_code, seen_evidence=seen_evidence
         )
         if not valid or validated_f is None:
             unverified_count += 1

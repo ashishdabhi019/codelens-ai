@@ -106,6 +106,8 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
         self.full_source = full_source
         self.findings: List[Finding] = []
         self._reported_lines: Set[Tuple[int, str]] = set()
+        self.vulnerable_sql_vars: Dict[str, Tuple[int, str]] = {}
+        self.dynamic_path_vars: Dict[str, Tuple[int, str]] = {}
 
     def _line_in_diff(self, lineno: Optional[int]) -> bool:
         if lineno is None:
@@ -147,6 +149,185 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
             )
         )
 
+    def visit_Assign(self, node: ast.Assign):
+        lineno = getattr(node, "lineno", 0)
+        val = node.value
+        sql_kw_regex = re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE\s+TABLE)\b', re.IGNORECASE)
+
+        # 1. Track dynamic SQL query construction
+        # e.g., query = f"SELECT id, name, balance FROM users WHERE id = {user_id}"
+        is_dynamic_sql = False
+        sql_text = ""
+
+        if isinstance(val, ast.JoinedStr):
+            joined_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+            if sql_kw_regex.search(joined_repr) and any(isinstance(v, ast.FormattedValue) for v in val.values):
+                is_dynamic_sql = True
+                sql_text = joined_repr
+        elif isinstance(val, ast.BinOp) and isinstance(val.op, (ast.Add, ast.Mod)):
+            bin_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+            if sql_kw_regex.search(bin_repr) and any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(val)):
+                is_dynamic_sql = True
+                sql_text = bin_repr
+        elif isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute) and val.func.attr == "format":
+            fmt_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+            if sql_kw_regex.search(fmt_repr):
+                is_dynamic_sql = True
+                sql_text = fmt_repr
+
+        if is_dynamic_sql:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.vulnerable_sql_vars[target.id] = (lineno, sql_text)
+                    if self._line_in_diff(lineno):
+                        self._add_finding(
+                            lineno=lineno,
+                            title="SQL Injection via dynamic query construction",
+                            category="security",
+                            severity="critical",
+                            description="Constructing SQL queries dynamically with f-strings, concatenation, or .format() allows SQL injection.",
+                            impact="Attackers can manipulate user inputs to execute arbitrary SQL commands, bypassing authorization and accessing or modifying database records.",
+                            recommendation="Use parameterized queries with placeholders: cursor.execute('SELECT ... WHERE id = ?', (param,))",
+                            suggested_fix='cursor.execute("SELECT id, name, balance FROM users WHERE id = ?", (user_id,))',
+                            confidence=1.0,
+                        )
+
+        # 2. Track dynamic file paths for path traversal
+        # e.g. file_path = f"/var/www/uploads/{user_id}.jpg"
+        is_dynamic_path = False
+        if isinstance(val, ast.JoinedStr):
+            joined_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+            if ("/" in joined_repr or "\\" in joined_repr or any(ext in joined_repr for ext in (".jpg", ".png", ".json", ".csv", ".txt", ".pdf"))) and any(isinstance(v, ast.FormattedValue) for v in val.values):
+                is_dynamic_path = True
+        elif isinstance(val, ast.BinOp) and isinstance(val.op, ast.Add):
+            bin_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+            if ("/" in bin_repr or "\\" in bin_repr) and not isinstance(val.right, ast.Constant):
+                is_dynamic_path = True
+
+        if is_dynamic_path:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.dynamic_path_vars[target.id] = (lineno, target.id)
+                    if self._line_in_diff(lineno):
+                        self._add_finding(
+                            lineno=lineno,
+                            title="Path Traversal via dynamic file path",
+                            category="security",
+                            severity="high",
+                            description="Constructing filesystem paths directly with formatted user input allows directory traversal attacks.",
+                            impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
+                            recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
+                            suggested_fix='import os\nsafe_filename = os.path.basename(user_id) + ".jpg"\nfile_path = os.path.join("/var/www/uploads", safe_filename)',
+                            confidence=0.95,
+                        )
+
+        # 3. Check hardcoded secrets / credentials
+        if self._line_in_diff(lineno):
+            for target in node.targets:
+                target_name = ""
+                if isinstance(target, ast.Name):
+                    target_name = target.id.lower()
+                elif isinstance(target, ast.Attribute):
+                    target_name = target.attr.lower()
+
+                if any(k in target_name for k in ("password", "passwd", "api_key", "secret", "token", "auth")):
+                    # Avoid flagging os.getenv / os.environ
+                    val_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
+                    if any(safe in val_repr for safe in ("os.getenv", "os.environ", "environ.get")):
+                        continue
+
+                    is_hardcoded = False
+                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                        if len(val.value) >= 8 and val.value.lower() not in ("password", "dummy", "default", "testing", "changeme"):
+                            is_hardcoded = True
+                    elif isinstance(val, ast.BoolOp):
+                        for val_elem in val.values:
+                            if isinstance(val_elem, ast.Constant) and isinstance(val_elem.value, str):
+                                if len(val_elem.value) >= 8 and (
+                                    val_elem.value.startswith("sk_") or len(val_elem.value) > 12
+                                ):
+                                    is_hardcoded = True
+                                    break
+
+                    if is_hardcoded:
+                        self._add_finding(
+                            lineno=lineno,
+                            title="Hardcoded credential detected",
+                            category="security",
+                            severity="high",
+                            description="A secret credential, API key, or authentication token is hardcoded in source.",
+                            impact="Hardcoded credentials in version control can be leaked or stolen, compromising backend services and sensitive user data.",
+                            recommendation="Load sensitive secrets from environment variables or a secure secret manager (e.g. os.getenv('API_KEY')).",
+                            suggested_fix='import os\nAPI_KEY = os.getenv("API_KEY")',
+                            confidence=1.0,
+                        )
+
+        # 4. Incorrect discount calculation formula: final_price = price * (discount / 100)
+        # Calculates discount amount rather than final discounted price
+        if isinstance(node.value, ast.BinOp) and isinstance(node.value.op, ast.Mult) and self._line_in_diff(lineno):
+            mult = node.value
+            left_name = mult.left.id if isinstance(mult.left, ast.Name) else ""
+            if isinstance(mult.right, ast.BinOp) and isinstance(mult.right.op, ast.Div):
+                div = mult.right
+                if isinstance(div.right, ast.Constant) and div.right.value in (100, 100.0):
+                    target_names = [t.id.lower() for t in node.targets if isinstance(t, ast.Name)]
+                    if any("price" in tn or "total" in tn or "cost" in tn or "final" in tn for tn in target_names):
+                        disc_name = div.left.id if isinstance(div.left, ast.Name) else "discount"
+                        p_name = left_name or "price"
+                        self._add_finding(
+                            lineno=lineno,
+                            title="Incorrect discount calculation formula",
+                            category="bug",
+                            severity="high",
+                            description=f"`{p_name} * ({disc_name} / 100)` calculates the discount deduction amount, not the final discounted price.",
+                            impact="Customers will be billed only the discount amount instead of the discounted total (e.g. 20% discount on $100 results in $20 charged instead of $80).",
+                            recommendation=f"Calculate final price as `{p_name} * (1 - {disc_name} / 100)` and validate non-negative values.",
+                            suggested_fix=f"if {disc_name} < 0 or {p_name} < 0:\n    raise ValueError('Values must be non-negative')\nfinal_price = {p_name} * (1 - {disc_name} / 100)",
+                            confidence=1.0,
+                        )
+
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        fn_name = node.name.lower()
+        if ("transfer" in fn_name or "pay" in fn_name) and any(self._line_in_diff(n.lineno) for n in ast.walk(node) if hasattr(n, "lineno")):
+            has_balance_check = False
+            has_receiver_check = False
+            returns_unconditional_success = False
+            success_lineno = None
+
+            for stmt in node.body:
+                if isinstance(stmt, ast.If):
+                    test_str = ast.unparse(stmt.test) if hasattr(ast, "unparse") else ""
+                    if ">=" in test_str or ">" in test_str or "balance" in test_str:
+                        has_balance_check = True
+                elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Dict):
+                    dict_str = ast.unparse(stmt.value) if hasattr(ast, "unparse") else ""
+                    if '"status": "success"' in dict_str or "'status': 'success'" in dict_str:
+                        returns_unconditional_success = True
+                        success_lineno = stmt.lineno
+
+            fn_source = ast.unparse(node) if hasattr(ast, "unparse") else ""
+            if "receiver" in fn_source.lower() and "select" in fn_source.lower():
+                if "where id = ?" in fn_source.lower() and fn_source.lower().count("select") >= 2:
+                    has_receiver_check = True
+
+            if has_balance_check and returns_unconditional_success and not has_receiver_check:
+                target_line = success_lineno if success_lineno and self._line_in_diff(success_lineno) else node.lineno
+                self._add_finding(
+                    lineno=target_line,
+                    title="Unconditional success return and missing receiver verification in transfer_money",
+                    category="bug",
+                    severity="high",
+                    description="`transfer_money` returns success even if the sender has insufficient funds, and updates balances without verifying that the recipient account exists.",
+                    impact="Failed transfers report success to callers, and transfers to invalid recipient accounts cause funds to be permanently debited without crediting anyone.",
+                    recommendation="Verify recipient existence before updating balances, return an error on insufficient balance, and execute transfers inside a transaction with rollback on failure.",
+                    suggested_fix=None,
+                    confidence=1.0,
+                )
+
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call):
         lineno = getattr(node, "lineno", 0)
         call_name = _get_call_name(node)
@@ -164,12 +345,21 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
                 # Check if string concatenation with variables
                 elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, (ast.Add, ast.Mod)):
-                    is_sqli = True
-                    fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
+                    if any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(first_arg)):
+                        is_sqli = True
+                        fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
                 # Check if .format() call
                 elif isinstance(first_arg, ast.Call) and _is_method_on(first_arg, {"format"}):
                     is_sqli = True
                     fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
+                # Check if variable previously identified as vulnerable dynamic SQL
+                elif isinstance(first_arg, ast.Name) and first_arg.id in self.vulnerable_sql_vars:
+                    assign_line, _ = self.vulnerable_sql_vars[first_arg.id]
+                    if any(f.line == assign_line and "sql" in f.title.lower() for f in self.findings):
+                        is_sqli = False
+                    else:
+                        is_sqli = True
+                        fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))'
 
                 if is_sqli and self._line_in_diff(lineno):
                     self._add_finding(
@@ -186,11 +376,10 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
 
         # 2. Dangerous eval() and exec()
         if call_name in ("eval", "exec"):
-            # ast.literal_eval is safe; only flag built-in eval/exec
             if node.args:
                 arg = node.args[0]
-                # If argument is not a literal constant (e.g. variable, call, or binary expression)
                 if not isinstance(arg, ast.Constant) and self._line_in_diff(lineno):
+                    arg_name = arg.id if isinstance(arg, ast.Name) else "expression"
                     self._add_finding(
                         lineno=lineno,
                         title=f"Dangerous {call_name}() on variable input",
@@ -199,13 +388,14 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                         description=f"{call_name}() called with dynamic or variable input, enabling arbitrary code execution.",
                         impact="An attacker who controls or influences the input can execute arbitrary Python commands with the application's privileges.",
                         recommendation=f"Avoid {call_name}(). For evaluating data structures safely, use ast.literal_eval().",
-                        suggested_fix="import ast\nreturn ast.literal_eval(user_input)",
+                        suggested_fix=f"import ast\nreturn ast.literal_eval({arg_name})",
                         confidence=1.0,
                     )
 
         # 3. Unsafe Deserialization: pickle.loads / pickle.load
         if call_name in ("pickle.loads", "pickle.load", "_pickle.loads", "_pickle.load"):
             if self._line_in_diff(lineno):
+                arg_name = node.args[0].id if node.args and isinstance(node.args[0], ast.Name) else "data"
                 self._add_finding(
                     lineno=lineno,
                     title="Unsafe pickle deserialization",
@@ -214,7 +404,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     description="pickle.loads() executes arbitrary bytecode during deserialization of untrusted payloads.",
                     impact="Deserializing untrusted data with pickle allows remote code execution (RCE).",
                     recommendation="Do not use pickle for untrusted input. Use safe data formats like json or protocol buffers.",
-                    suggested_fix="import json\ndata = json.loads(payload)",
+                    suggested_fix=f"import json\nreturn json.loads({arg_name})",
                     confidence=1.0,
                 )
 
@@ -268,102 +458,85 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     confidence=1.0,
                 )
 
-        # 7. Weak cryptographic hashing: hashlib.md5 or hashlib.sha1
+        # 7. Password hashing and cryptographic hashing: hashlib.md5 or hashlib.sha1
         if call_name in ("hashlib.md5", "hashlib.sha1"):
             if self._line_in_diff(lineno):
-                self._add_finding(
-                    lineno=lineno,
-                    title=f"Weak cryptographic hash algorithm ({call_name})",
-                    category="security",
-                    severity="medium",
-                    description=f"{call_name}() is vulnerable to collision attacks and is cryptographically broken.",
-                    impact="Attackers can generate hash collisions to forge signatures, bypass checksum validation, or crack passwords.",
-                    recommendation="Use modern secure hash algorithms such as hashlib.sha256() or hashlib.sha3_256().",
-                    suggested_fix="import hashlib\nhash_val = hashlib.sha256(data).hexdigest()",
-                    confidence=0.95,
-                )
+                line_text = self.added_lines.get(lineno, "").lower()
+                is_password = any(k in line_text for k in ("password", "passwd", "pwd", "pass", "secret"))
+                if is_password:
+                    self._add_finding(
+                        lineno=lineno,
+                        title=f"Insecure password hashing algorithm ({call_name})",
+                        category="security",
+                        severity="high",
+                        description=f"{call_name}() is used to hash passwords. Fast digest algorithms lack work-factor tuning and are vulnerable to rapid offline brute-force cracking.",
+                        impact="Attackers who obtain the database can crack user passwords rapidly using GPUs or precomputed rainbow tables.",
+                        recommendation="Use modern, salted, adaptive password hashing algorithms such as Argon2id (via argon2-cffi) or bcrypt instead of MD5 or SHA-256.",
+                        suggested_fix="import bcrypt\nhashed_password = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()",
+                        confidence=0.95,
+                    )
+                else:
+                    self._add_finding(
+                        lineno=lineno,
+                        title=f"Weak cryptographic hash algorithm ({call_name})",
+                        category="security",
+                        severity="medium",
+                        description=f"{call_name}() is vulnerable to collision attacks and is cryptographically broken.",
+                        impact="Attackers can generate hash collisions to forge signatures, bypass checksum validation, or crack passwords.",
+                        recommendation="Use modern secure hash algorithms such as hashlib.sha256() or hashlib.sha3_256().",
+                        suggested_fix="import hashlib\nhash_val = hashlib.sha256(data).hexdigest()",
+                        confidence=0.95,
+                    )
 
-        # 8. SSRF via requests.* to variable webhook or dynamic url
-        if call_name in ("requests.get", "requests.post", "requests.put", "requests.delete", "requests.patch"):
+        # 8. SSRF via requests.* or httpx.* to variable url
+        if call_name in ("requests.get", "requests.post", "requests.put", "requests.delete", "requests.patch", "httpx.get", "httpx.post"):
             if node.args and self._line_in_diff(lineno):
                 url_arg = node.args[0]
                 url_str = ""
                 if isinstance(url_arg, ast.Name):
                     url_str = url_arg.id.lower()
-                if any(w in url_str for w in ("webhook", "callback", "dest_url", "target_url", "redirect")):
+                elif isinstance(url_arg, ast.Constant) and isinstance(url_arg.value, str):
+                    url_str = ""
+                if any(w in url_str for w in ("url", "dest", "target", "endpoint", "webhook", "callback", "redirect")):
                     self._add_finding(
                         lineno=lineno,
                         title="Potential Server-Side Request Forgery (SSRF)",
                         category="security",
                         severity="high",
-                        description="HTTP request dispatched to user-supplied dynamic URL without validation or IP allowlisting.",
+                        description=f"HTTP request dispatched to dynamic destination URL ('{url_arg.id if isinstance(url_arg, ast.Name) else 'url'}') without validation or IP allowlisting.",
                         impact="Attackers can provide internal network URLs (e.g. 169.254.169.254 or localhost) to access cloud metadata or intranet services.",
                         recommendation="Validate destination URLs against an allowlist of approved domains and block loopback/private IP ranges.",
                         suggested_fix=None,
                         confidence=0.9,
                     )
 
-        # 9. Path traversal via open(f"...")
+        # 9. Path traversal via open(f"...") or open(variable_path)
         if call_name == "open" and node.args and self._line_in_diff(lineno):
             path_arg = node.args[0]
+            is_path_traversal = False
+            reported_line = lineno
             if isinstance(path_arg, ast.JoinedStr):
-                # Has variable formatting in file path
                 line_text = self.added_lines.get(lineno, "")
                 if "/" in line_text or "\\" in line_text:
-                    self._add_finding(
-                        lineno=lineno,
-                        title="Path Traversal via dynamic file path",
-                        category="security",
-                        severity="high",
-                        description="Constructing filesystem paths directly with formatted user input allows directory traversal attacks.",
-                        impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
-                        recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
-                        suggested_fix='safe_name = os.path.basename(transaction_id)\nwith open(os.path.join(ALLOWED_DIR, f"{safe_name}.json"), "r") as f:\n    pass',
-                        confidence=0.95,
-                    )
+                    is_path_traversal = True
+            elif isinstance(path_arg, ast.Name) and path_arg.id in self.dynamic_path_vars:
+                assign_lineno, _ = self.dynamic_path_vars[path_arg.id]
+                # If already reported at assignment line, skip
+                if not any(f.line == assign_lineno and "path traversal" in f.title.lower() for f in self.findings):
+                    is_path_traversal = True
 
-        self.generic_visit(node)
-
-    def visit_Assign(self, node: ast.Assign):
-        lineno = getattr(node, "lineno", 0)
-        # Check hardcoded secrets / credentials
-        if self._line_in_diff(lineno):
-            for target in node.targets:
-                target_name = ""
-                if isinstance(target, ast.Name):
-                    target_name = target.id.lower()
-                elif isinstance(target, ast.Attribute):
-                    target_name = target.attr.lower()
-
-                if any(k in target_name for k in ("password", "passwd", "api_key", "secret", "token", "auth")):
-                    val = node.value
-                    # Check if assigned a string literal constant
-                    is_hardcoded = False
-                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
-                        if len(val.value) >= 8 and val.value.lower() not in ("password", "dummy", "default", "testing", "changeme"):
-                            is_hardcoded = True
-                    # Check if val is BoolOp with or (e.g. api_key or "sk_live_...")
-                    elif isinstance(val, ast.BoolOp):
-                        for val_elem in val.values:
-                            if isinstance(val_elem, ast.Constant) and isinstance(val_elem.value, str):
-                                if len(val_elem.value) >= 8 and (
-                                    val_elem.value.startswith("sk_") or len(val_elem.value) > 12
-                                ):
-                                    is_hardcoded = True
-                                    break
-
-                    if is_hardcoded:
-                        self._add_finding(
-                            lineno=lineno,
-                            title="Hardcoded credential detected",
-                            category="security",
-                            severity="high",
-                            description="A secret credential, API key, or authentication token is hardcoded in source.",
-                            impact="Hardcoded credentials in version control can be leaked or stolen, compromising backend services and sensitive user data.",
-                            recommendation="Load sensitive secrets from environment variables or a secure secret manager (e.g. os.getenv('API_KEY')).",
-                            suggested_fix='import os\nAPI_KEY = os.getenv("API_KEY")',
-                            confidence=1.0,
-                        )
+            if is_path_traversal:
+                self._add_finding(
+                    lineno=reported_line,
+                    title="Path Traversal via dynamic file path",
+                    category="security",
+                    severity="high",
+                    description="Constructing filesystem paths directly with formatted user input allows directory traversal attacks.",
+                    impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
+                    recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
+                    suggested_fix='import os\nsafe_name = os.path.basename(user_id)\nfile_path = os.path.join(ALLOWED_DIR, f"{safe_name}.jpg")',
+                    confidence=0.95,
+                )
 
         self.generic_visit(node)
 

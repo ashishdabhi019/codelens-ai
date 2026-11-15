@@ -84,6 +84,67 @@ def check_missing_python_imports(code: str) -> str:
     return code
 
 
+PYTHON_BUILTINS = {
+    "True", "False", "None", "int", "str", "float", "list", "dict", "set", "tuple", "bool",
+    "len", "sum", "range", "enumerate", "zip", "map", "filter", "min", "max", "abs", "round",
+    "open", "print", "isinstance", "issubclass", "getattr", "setattr", "hasattr", "delattr",
+    "callable", "iter", "next", "super", "type", "id", "hash", "repr", "any", "all",
+    "Exception", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError",
+    "RuntimeError", "IOError", "FileNotFoundError", "ZeroDivisionError", "NotImplementedError",
+}
+
+
+def check_undefined_python_variables(fix: str, original_code: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """
+    Checks whether the suggested fix references obvious undefined variables.
+    Only strictly checks when original_code / surrounding scope is available,
+    since partial snippet fixes legitimately reference function parameters (e.g. nums, price).
+    """
+    if not original_code:
+        return True, None
+
+    try:
+        wrapped = fix
+        if "return " in fix or "yield " in fix:
+            indented = "\n".join("    " + line for line in fix.splitlines())
+            wrapped = f"def _dummy():\n{indented}"
+        tree = ast.parse(wrapped)
+
+        defined_names = set(PYTHON_BUILTINS)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    defined_names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    defined_names.add(alias.asname or alias.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined_names.add(node.name)
+                for arg in node.args.args:
+                    defined_names.add(arg.arg)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                defined_names.add(node.id)
+
+        if original_code:
+            for token in re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', original_code):
+                defined_names.add(token)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in defined_names:
+                    if node.id in (
+                        "self", "cls", "cursor", "conn", "os", "sys", "json", "ast", "math",
+                        "re", "requests", "hashlib", "bcrypt", "tempfile", "subprocess",
+                        "ALLOWED_DIR", "BASE_DIR", "uid", "user_id", "param", "params",
+                        "args", "kwargs", "data", "payload", "value", "val", "item", "expression"
+                    ):
+                        continue
+                    return False, f"Suggested fix references undefined variable '{node.id}'."
+    except Exception:
+        pass
+    return True, None
+
+
 def check_function_signature_preserved(orig: str, fix: str) -> Tuple[bool, Optional[str]]:
     """
     If both original code and fix declare a function, verify parameter counts are compatible.
@@ -180,6 +241,15 @@ def validate_suggested_fix(
         if re.search(r'\.(?:innerHTML|outerHTML)\s*=\s*(?:`[^`]*\$\{|\w+)', cleaned_fix):
             return ValidationResult(None, "Suggested fix still assigns unsanitized variable directly to innerHTML instead of textContent or sanitization.", "rejected")
 
+    # 3f. Path Traversal: fix must not retain unconstrained dynamic path formatting without sanitization
+    if "path" in lower_title or "traversal" in lower_title or "path" in lower_desc:
+        if re.search(r'open\(\s*f["\'][^"\']*/\{', cleaned_fix) and "os.path.basename" not in cleaned_fix and "os.path.join" not in cleaned_fix:
+            return ValidationResult(None, "Suggested fix retains dynamic path construction without basename sanitization.", "rejected")
+
+    # 3g. Credential: fix must not introduce hardcoded secret tokens
+    if re.search(r'["\'](?:sk_live_|sk_test_|ghp_|AKIA)[A-Za-z0-9_\-]{8,}["\']', cleaned_fix):
+        return ValidationResult(None, "Suggested fix introduces a hardcoded secret token.", "rejected")
+
     # Determine file target language
     target_path = file_path or finding.file or ""
     is_python = target_path.endswith(".py") or "python" in target_path.lower()
@@ -194,6 +264,11 @@ def validate_suggested_fix(
             preserved, sig_reason = check_function_signature_preserved(original_code, cleaned_fix)
             if not preserved:
                 return ValidationResult(None, sig_reason, "rejected")
+
+        # Check for undefined variables in Python fix
+        valid_vars, var_reason = check_undefined_python_variables(cleaned_fix, original_code)
+        if not valid_vars:
+            return ValidationResult(None, var_reason, "rejected")
 
         # Check missing standard library imports (e.g. os, ast, json)
         cleaned_fix = check_missing_python_imports(cleaned_fix)
