@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import type { Finding } from '../types';
 import { SeverityBadge } from './SeverityBadge';
-import { ChevronDown, ChevronRight, FileCode } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileCode, Copy, Check } from 'lucide-react';
+import { useToast } from '../context/ToastContext';
 
 const severityBorders: Record<string, string> = {
   critical: '#f43f5e',
@@ -12,7 +13,24 @@ const severityBorders: Record<string, string> = {
 
 export function FindingCard({ finding }: { finding: Finding }) {
   const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const toast = useToast();
   const borderLeftColor = severityBorders[finding.severity] ?? '#27272a';
+
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!finding.suggested_fix) return;
+    navigator.clipboard.writeText(finding.suggested_fix).then(() => {
+      setCopied(true);
+      toast.success(
+        `Fix for "${finding.title}" copied to clipboard`,
+        'Copied to Clipboard'
+      );
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {
+      toast.error('Failed to copy to clipboard');
+    });
+  };
 
   return (
     <div style={{
@@ -125,24 +143,50 @@ export function FindingCard({ finding }: { finding: Finding }) {
 
       {finding.suggested_fix && (
         <div style={{ marginTop: '10px' }}>
-          <button
-            onClick={() => setExpanded(!expanded)}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: '#ffffff',
-              fontSize: '12px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '2px 0',
-              fontWeight: 600,
-            }}
-          >
-            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            <span>Suggested Fix</span>
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: expanded ? '6px' : '0' }}>
+            <button
+              onClick={() => setExpanded(!expanded)}
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: '#ffffff',
+                fontSize: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '2px 0',
+                fontWeight: 600,
+              }}
+            >
+              {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              <span>Suggested Fix</span>
+            </button>
+
+            {expanded && (
+              <button
+                type="button"
+                onClick={handleCopy}
+                style={{
+                  background: '#161b22',
+                  border: '1px solid #30363d',
+                  borderRadius: '4px',
+                  color: copied ? '#4ade80' : '#8b949e',
+                  fontSize: '11px',
+                  padding: '3px 8px',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontFamily: "'Inter', sans-serif",
+                  transition: 'all 0.12s ease',
+                }}
+              >
+                {copied ? <Check size={12} color="#4ade80" /> : <Copy size={12} />}
+                <span>{copied ? 'Copied fix!' : 'Copy fix'}</span>
+              </button>
+            )}
+          </div>
           {expanded && (
             <pre style={{
               margin: '8px 0 0',

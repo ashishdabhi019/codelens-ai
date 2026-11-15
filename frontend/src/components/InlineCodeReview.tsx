@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { Finding } from '../types';
 import { SeverityBadge } from './SeverityBadge';
 import { Copy, Check, FileCode2 } from 'lucide-react';
+import { useToast } from '../context/ToastContext';
 
 const TOKEN_REGEX = /(#[^\n]*|\/\/[^\n]*)|(f?"""[\s\S]*?"""|f?'''[\s\S]*?'''|f?"(?:\\.|[^"\\])*"|f?'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:def|class|function|async|await|return|yield|import|from|as|export|default|const|let|var|type|interface|package|func)\b)|(\b(?:if|elif|else|for|while|try|except|finally|with|match|case|switch|break|continue|throw|raise)\b)|(\b(?:and|or|not|in|is)\b)|(\b(?:int|str|float|bool|list|dict|set|tuple|void|number|string|boolean|any|unknown|never)\b)|(\b(?:True|False|None|true|false|null|undefined|nil)\b)|(\b[A-Z][a-zA-Z0-9_]*\b)|(\b(?:self|this)\b)|(\b\d+(?:\.\d+)?\b)|(\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\())/g;
 
@@ -105,11 +106,19 @@ interface InlineCodeReviewProps {
 
 export function InlineCodeReview({ diffContent, filename, findings }: InlineCodeReviewProps) {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const toast = useToast();
 
-  const copyToClipboard = (text: string, index: number) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
+  const copyToClipboard = (text: string, index: number, title?: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedIndex(index);
+      toast.success(
+        title ? `Fix for "${title}" copied to clipboard` : 'Suggested fix copied to clipboard',
+        'Copied to Clipboard'
+      );
+      setTimeout(() => setCopiedIndex(null), 2000);
+    }).catch(() => {
+      toast.error('Failed to copy to clipboard');
+    });
   };
 
   // Determine if content is git diff format
@@ -340,7 +349,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                 </span>
                 <button
                   type="button"
-                  onClick={() => copyToClipboard(finding.suggested_fix!, typeof cardKey === 'number' ? cardKey : 999)}
+                  onClick={() => copyToClipboard(finding.suggested_fix!, typeof cardKey === 'number' ? cardKey : 999, finding.title)}
                   style={{
                     background: '#161b22',
                     border: '1px solid #30363d',
