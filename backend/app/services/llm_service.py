@@ -21,7 +21,10 @@ CRITICAL INSTRUCTIONS:
   * If the developer fixed an old bug by deleting a '-' line and replacing it with a '+' line (for example, replacing subtotal addition with multiplication), DO NOT report it as an active bug! It is already fixed by the author.
   * ONLY report bugs that remain unresolved in the resulting new code ('+' added or unchanged lines).
 - MATHEMATICAL ACCURACY:
-  * Average is always calculated as sum divided by count. NEVER claim an average should be calculated using multiplication. The real defect in unvalidated average calculation is ZeroDivisionError on empty inputs ([]).
+  * Average is always calculated as sum divided by count. NEVER claim an average should be calculated using multiplication.
+  * ZERO DIVISION: ONLY report ZeroDivisionError when the code explicitly performs division or modulus ('/', '//', '%') where the divisor can evaluate to zero. NEVER claim multiplication (e.g. `total_spend * 0.125`) is division or causes ZeroDivisionError.
+- VERBATIM EVIDENCE:
+  * In "evidence", copy the EXACT line from the submitted code. Never invent variables, identifiers, or lines.
 - For EVERY issue found:
   * Specify the EXACT 1-based line number in the submitted code where the issue occurs.
   * Identify the exact root cause of the fault.
@@ -164,23 +167,25 @@ async def generate_review(
                 f.setdefault("confidence", 0.85)
             data["files_reviewed"] = files_reviewed
             data["llm_available"] = True
+            data["partial_analysis"] = False
             data.setdefault("deterministic_findings", [])
             return ReviewResult(**data), True
         except (httpx.ConnectError, httpx.TimeoutException):
-            # Ollama service is not running locally; don't retry in a loop, fail-fast to deterministic
+            # Ollama service is not running locally or timed out; don't retry in a loop, fail-fast to deterministic
             break
         except Exception:
             if attempt == settings.max_retries - 1:
                 break
 
-    # Graceful degradation: return a clean baseline so the user still gets full deterministic rule results
+    # Graceful degradation: return partial analysis result so the user gets full deterministic rule results
     return ReviewResult(
-        summary="Deterministic inspection complete. LLM semantic analysis was offline.",
-        overall_status="approved",
-        risk_level="low",
+        summary="Static inspection complete. LLM semantic analysis was offline (partial review).",
+        overall_status="needs_attention",
+        risk_level="medium",
         files_reviewed=files_reviewed,
         findings=[],
         missing_tests=[],
         positive_observations=[],
         llm_available=False,
+        partial_analysis=True,
     ), False

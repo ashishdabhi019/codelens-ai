@@ -1,29 +1,33 @@
 # CodeLens AI 🔍
-> **Automated AI Code Review Studio with Deterministic Safety & Semantic LLM Orchestration**
+> **Automated Code Review Agent with Deterministic AST Safety & Semantic LLM Orchestration**
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-53%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Tests](https://img.shields.io/badge/pytest-75%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Benchmark](https://img.shields.io/badge/benchmark-100%25%20F1-blue?logo=speedtest&logoColor=white)](backend/benchmark.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-## 🎯 Executive Summary (For Interviewers & Technical Reviewers)
+## 🎯 Executive Summary
 
-**CodeLens AI** is an intelligent, developer-first code review platform designed to solve the two biggest flaws in modern automated code review:
-1. **Pure static analysis (Linters / SAST)** flags syntax but is completely blind to subtle business logic bugs, inverted mathematical formulas, and missing edge-case unit tests.
-2. **Pure LLM reviewers** hallucinate line numbers, miss obvious OWASP vulnerabilities, incur high latency and token costs, and leak private code to external APIs.
+**CodeLens AI** is an intelligent, developer-first automated code review platform designed to overcome the critical weaknesses of standalone linters and pure LLM reviewers:
 
-CodeLens AI bridges this gap with a **Hybrid Multi-Pass Architecture**:
-- **Pass 1 — Deterministic Safety Engine:** 15+ pre-compiled AST & regex rules for critical vulnerabilities (SQL Injection, Remote Code Execution via `eval`/`pickle`, SSRF, hardcoded credentials, inverted formulas, unchecked division by zero) running in sub-milliseconds with **100% confidence** and zero hallucinations.
-- **Pass 2 — Semantic LLM Orchestration:** A local, private LLM (defaults to `qwen2.5-coder:3b` for sub-second analysis, with dynamic auto-discovery supporting `llama3.2` or any local model via Ollama) analyzes business logic, arithmetic intent, and edge cases.
-- **Pass 3 — Root-Cause Duplicate Detection & Fix Validation:** Groups findings by semantic concept clusters and line proximity to merge overlapping findings under different titles into a single canonical issue. Validates suggested fixes against the original buggy code to guarantee actionable remediations.
-- **Pass 4 — Assumption Sanitization & Accurate Summaries:** Detects and flags uncertain business logic without guessing arbitrary constants (e.g. tier discounts). Inspects the diff for test assertions to prevent hallucinated claims of existing tests.
-- **Pass 5 — Devin AI / GitHub PR-Style Inline Studio:** Offending lines are presented in a line-numbered editor with interactive inline review cards featuring unique finding IDs (`#CL-...`), root cause details, code evidence snippets, and 1-click **Copy fix** buttons.
+1. **Pure Linters / Regex SAST** flag syntax errors but are blind to business logic errors, inverted arithmetic formulas, and subtle edge cases. Regex-only detectors frequently raise noisy false positives on safe parameterized queries or literal evaluations.
+2. **Pure LLM Reviewers** are prone to hallucinations: inventing nonexistent file paths, reporting phantom line numbers, fabricating ZeroDivision errors on multiplication code (e.g., `total_spend * 0.125`), and suggesting syntactically broken fixes.
 
-> ⚡ **Zero-Dependency Quick Evaluation:** Ollama is **completely optional**. If Ollama is offline or not installed, CodeLens AI gracefully degrades to its deterministic engine — returning all critical security findings instantly with `llm_available: false`.
+CodeLens AI solves this with a **Hybrid 4-Pass Architecture**:
+- **PASS 1 — Deterministic Static & AST Analysis:** For Python code, a dedicated Python AST (`ast.parse`) analyzer detects SQL injection in dynamic queries, dangerous `eval`/`exec`, unsafe `pickle.loads()`, hardcoded credentials, path traversal, insecure temporary files, and unhandled collection division. Non-Python code is evaluated with context-aware static security signatures.
+- **PASS 2 — Semantic LLM Analysis:** Local, private LLM execution (via Ollama, defaulting to `qwen2.5-coder:3b` or configured local models) evaluates business logic, arithmetic intent, and edge cases.
+- **PASS 3 — Strict Finding Validation & Fix Verification:**
+  - **Source Evidence Validation:** Every AI finding is verified against actual diff hunks. Nonexistent files, out-of-bounds line numbers, and mismatched evidence are rejected.
+  - **False-Positive Elimination:** Rejects false ZeroDivision claims on code lacking division operators, rejects safe parameterized SQL queries, ignores `ast.literal_eval`, and preserves safe environment variable reads (`os.getenv`).
+  - **Fix AST Validation:** Remediation snippets are validated via Python AST parsing and assigned explicit verification statuses (`validated_syntax`, `proposed`, or `rejected`).
+- **PASS 4 — Devin AI / GitHub PR-Style Inline Code Review:** Line-indexed review studio displaying diff lines with inline finding cards, root cause analysis, code evidence snippets, and 1-click verified remediation copy.
+
+> ⚡ **Offline & Partial Review Guarantee:** If Ollama is offline or unreachable, CodeLens AI continues deterministic analysis, sets `llm_available: false` and `partial_analysis: true`, and never returns an unconditional "approved" status or unverified "low" risk.
 
 ---
 
@@ -32,7 +36,7 @@ CodeLens AI bridges this gap with a **Hybrid Multi-Pass Architecture**:
 ```mermaid
 flowchart TD
     subgraph Client ["Frontend (React 19 + TypeScript + Vite)"]
-        UI["Studio Code Window\nLine 1 Pure Code Editor"] --> SUBMIT["Submit Diff / File Upload"]
+        UI["Studio Code Window\nLine-Numbered PR View"] --> SUBMIT["Submit Diff / File Upload"]
         SUBMIT --> SYNTH["convertSourceToDiff()\nTransparent Diff Synthesis"]
         RESP["Inline Code Review Viewer\nGitHub PR / Devin AI Style Cards"]
     end
@@ -41,14 +45,14 @@ flowchart TD
         ROUTER["REST API Routes\n/api/reviews"] --> AGENT["Code Review Agent\nOrchestrator"]
         
         subgraph Pipeline ["Hybrid Review Pipeline"]
-            AGENT --> P1["1. parse_git_diff\nUnified Diff Parser & Line Sync"]
+            AGENT --> P1["1. parse_git_diff\nUnified Diff Parser & Hunk Indexer"]
             AGENT --> P2["2. inspect_changed_code\nContext Window Formatter"]
-            AGENT --> P3["3. detect_risky_patterns\nDeterministic Safety Engine (15+ Rules)"]
-            AGENT --> P4["4. generate_review\nSemantic LLM (Ollama / Local Llama 3.2)"]
-            AGENT --> P5["5. validate_and_merge\nPydantic Validator & Deduplication"]
+            AGENT --> P3["3. detect_risky_patterns\nPython AST & Static Rules (Pass 1)"]
+            AGENT --> P4["4. generate_review\nSemantic LLM (Ollama) (Pass 2)"]
+            AGENT --> P5["5. validate_and_merge\nSource Evidence & Fix AST Validation (Pass 3)"]
         end
 
-        P5 --> DB[("SQLite Database (aiosqlite)\nFull Diff & Review Persistence")]
+        P5 --> DB[("SQLite Database (aiosqlite)\nReview & Diff Persistence")]
         DB --> ROUTER
     end
 
@@ -58,14 +62,14 @@ flowchart TD
 
 ---
 
-## ⚡ 60-Second Quickstart
+## ⚡ Quickstart
 
 ### Prerequisites
-- **Python 3.11+** (Python 3.13 tested)
+- **Python 3.11+** (Python 3.13 recommended)
 - **Node.js 18+** & npm
-- *(Optional)* [Ollama](https://ollama.com/) with `qwen2.5-coder:3b` pulled (recommended for sub-second code reviews) or `llama3.2`
+- *(Optional)* [Ollama](https://ollama.com/) with `qwen2.5-coder:3b` or `llama3.2` for semantic review.
 
-### 1. Start the Backend
+### 1. Start Backend
 
 ```bash
 cd backend
@@ -80,63 +84,99 @@ pip install -r requirements.txt
 # Start FastAPI server
 uvicorn app.main:app --port 8000 --reload
 ```
-*Backend API will be live at `http://localhost:8000` (Interactive Swagger docs: `http://localhost:8000/docs`).*
+*Backend API will run at `http://localhost:8000` (Interactive Swagger docs: `http://localhost:8000/docs`).*
 
-### 2. Start the Frontend
+### 2. Start Frontend
 
 ```bash
-# In a new terminal window:
 cd frontend
 
 # Install dependencies and start Vite dev server
 npm install
 npm run dev
 ```
-*Frontend will be live at `http://localhost:5173`.*
+*Frontend will run at `http://localhost:5173`.*
 
 ---
 
-## 🧪 Built-in Evaluation Scenarios
+## 📊 Measured Accuracy & Benchmark Suite
 
-To test the application immediately without crafting unified diffs, click any of the **Quick-Load Evaluation Test Cases** in the New Review studio:
+CodeLens AI includes a standalone, reproducible benchmark suite (`backend/benchmark.py`) that measures Precision, Recall, F1 score, and False-Positive Rate across security vulnerabilities, logic bugs, false-positive traps, and clean code.
 
-| Scenario | Target File | What It Tests | Expected Output |
-| :--- | :--- | :--- | :--- |
-| **SQL Injection & RCE** | `user_service.py` | Raw f-string query in `cursor.execute()`, hardcoded `DB_PASSWORD`, and `eval(filter_expr)` | **CRITICAL RISK** (`Changes Requested`) — 3 deterministic security findings with 1-click parameterized query remediations |
-| **Calculation Logic Bug** | `calculator.py` | Inverted discount formula `price / (1 - discount/100)`, unchecked division risk in `calculate_average()`, unverified tier discount rate, and missing negative value validation | **HIGH / MEDIUM RISK** — 4 prioritized findings with copyable fixes, safe division guards, tier assumption warnings, and negative value bounds |
-| **Missing Boundary Tests** | `math_utils.py` | `calculate_median()` with no test coverage for empty arrays, single elements, or even-length inputs | **TEST COVERAGE** — Prescriptive unit test suggestions for boundary edge cases |
+### Run Benchmark:
+
+```bash
+./backend/.venv/bin/python backend/benchmark.py
+```
+
+### Benchmark Results:
+
+```
+================================================================================
+CODELENS AI — DETERMINISTIC & FINDING-VALIDATION BENCHMARK
+================================================================================
+[   TP (HIT)    ] Security     | SQLi Dynamic f-string                  (1.1ms)
+[  TN (CLEAN)   ] Security     | SQL Parameterized Query (Safe)         (0.1ms)
+[   TP (HIT)    ] Security     | Hardcoded API Secret                   (0.2ms)
+[  TN (CLEAN)   ] Security     | Safe Environment Variable Secret       (0.1ms)
+[   TP (HIT)    ] Security     | Dynamic eval() on User Input           (0.3ms)
+[  TN (CLEAN)   ] Security     | Safe ast.literal_eval()                (0.1ms)
+[   TP (HIT)    ] Security     | Unsafe pickle.loads() Deserialization  (0.2ms)
+[   TP (HIT)    ] Logic        | ZeroDivision on Empty Collection       (0.3ms)
+[  TN (CLEAN)   ] Logic        | Multiplication Decimal Cashback (Trap) (0.1ms)
+[   TP (HIT)    ] Logic        | Inverted Discount Formula              (0.2ms)
+[  TN (CLEAN)   ] Clean Code   | Clean Math Function                    (0.1ms)
+[   TP (HIT)    ] Security     | Path Traversal in open()               (0.2ms)
+--------------------------------------------------------------------------------
+METRICS SUMMARY:
+  Total Test Cases    : 12
+  True Positives (TP) : 7
+  True Negatives (TN) : 5
+  False Positives (FP): 0
+  False Negatives (FN): 0
+  Precision           : 100.0%
+  Recall              : 100.0%
+  F1 Score            : 100.0%
+  False Positive Rate : 0.0%
+  Avg Processing Time : 0.23 ms
+================================================================================
+```
 
 ---
 
-## 🛠️ Key Architectural Decisions & Engineering Highlights
+## 🧪 Comprehensive Automated Test Suite
 
-### 1. Why a Hybrid Engine Over a Pure LLM?
-| Dimension | Pure LLM Approach | CodeLens AI Hybrid Engine |
-| :--- | :--- | :--- |
-| **False Negative Rate on OWASP** | 10–25% (models can skip patterns) | **0%** (deterministic rules always match) |
-| **Hallucinated Line Numbers** | Frequent on multi-file diffs | **Zero** (diff parser indexes exact target line numbers) |
-| **Cold Start / Offline Capability** | Completely fails if LLM/network down | **100% operational** (deterministic safety checks run locally) |
-| **Enterprise Privacy** | Code sent to remote third-party APIs | **100% on-premise / local** (SQLite + local Ollama) |
+The test suite contains **75 automated unit and regression tests** across 11 test modules:
 
-### 2. 3-Tier Robust JSON Extraction Strategy
-LLMs often inject conversational markdown fences or preambles despite prompt rules. `llm_service.py` implements a resilient 3-tier fallback parser:
-1. **Direct `json.loads`**: Zero-overhead fast path when the model conforms strictly.
-2. **Regex Code-Fence Matcher**: Extracts `{...}` from ` ```json ... ``` ` markdown blocks.
-3. **Greedy Outer-Brace Scanner**: Isolates the outermost balanced `{ ... }` structure if the model added conversational remarks.
-4. **Graceful Fallback**: If all attempts fail or Ollama is offline, the review returns safely with `llm_available: false` without crashing the user session.
+```bash
+./backend/.venv/bin/pytest backend/tests -v
+```
 
-### 3. Devin AI / GitHub PR-Style Inline Code Review Component
-Rather than burying findings in generic tabular cards, `InlineCodeReview.tsx` matches findings directly to line numbers:
-- **Clean Line 1 Display**: Strips synthetic diff metadata (`diff --git`, `---`, `+++`, `@@`) so users view real code starting at Line 1.
-- **Diff Tinting**: Added lines (`+`) receive subtle green backgrounds with green prefixes; removed lines (`-`) receive red backgrounds.
-- **Inline Remediation Cards**: Offending lines trigger an embedded bot comment card featuring fault explanation, impact assessment, and a 1-click **Copy fix** code block.
-- **Dual View Mode**: Switch between `Inline Code Review` (code window) and `All Findings Cards` (issue overview).
+### Test Modules:
+1. `test_evidence_validation.py` (8 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, out-of-bounds lines, false ZeroDivision on multiplication, safe parameterized SQL, and `ast.literal_eval`.
+2. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).
+3. `test_diff_parser.py` & `test_diff_parser_extended.py` (10 tests): Multi-file and multi-hunk diff parsing, `\ No newline at end of file` marker safety, binary patch detection, and hunk line offset tracking.
+4. `test_pattern_detector.py` (8 tests): AST and static rules for SQL injection, hardcoded credentials, unsafe eval/exec, pickle deserialization, and clean code validation.
+5. `test_multilanguage.py` (5 tests): Multi-language detection for TypeScript, JavaScript, Go, Java, and C/C++.
+6. `test_calculator_22_lines.py` (1 test): Complete regression testing on multi-defect calculator scenarios.
+7. `test_review_validator.py` (15 tests): Semantic deduplication, severity ordering, risk escalation, and assumption sanitization.
+8. `test_llm_offline_handling.py` (2 tests): Graceful degradation when Ollama is offline, partial analysis flags, and non-approved status reporting.
+9. `test_api.py` & `test_api_security_extended.py` (11 tests): FastAPI endpoint validation, path traversal filename sanitization, streaming upload size limits, and safe error handling.
 
-### 4. Floating Dark-Glass Toast System
-Inspired by **Linear** and **Sonner**:
-- Located in the bottom-right corner (`bottom: 24px, right: 28px`) so it never obstructs header navigation or the **Copy Report** and **Export JSON** action buttons.
-- Styled in translucent dark glass (`rgba(15, 15, 19, 0.94)`) with backdrop blur, subtle 1px border, and tactile status micro-badges.
-- Self-cleaning single-line layout that eliminates redundant stacked text.
+Frontend static analysis & production build:
+```bash
+npm --prefix frontend run build
+```
+*(Built in 267ms, 0 TypeScript errors).*
+
+---
+
+## ⚠️ Known Limitations & Failure Modes
+
+1. **Semantic LLM Dependency**: When Ollama is offline, semantic analysis cannot evaluate intent or domain-specific business rules. The application explicitly flags `partial_analysis: true` and restricts findings to deterministic AST rules.
+2. **Cross-Module Type Inference**: The AST analyzer evaluates the submitted diff file in context. Deep cross-module control-flow analysis (e.g. tracking a variable across 10 separate services) requires an external whole-program symbol table.
+3. **Complex Dynamic Metaprogramming**: Dynamic Python constructions (`getattr(sys.modules[...], ...)` or nested `eval` chains) may require human verification or dynamic taint analysis.
+4. **Non-Python Fix Validation**: Python fixes undergo strict AST syntax parsing. Fixes for TypeScript, Go, Java, and C/C++ are marked as `proposed` and validated against security and placeholder patterns, but do not invoke native external language compilers in the lightweight sandbox.
 
 ---
 
@@ -144,167 +184,14 @@ Inspired by **Linear** and **Sonner**:
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/reviews` | Submit a unified diff or source file for multi-pass analysis |
-| `POST` | `/api/reviews/upload` | Multipart file upload (`.py`, `.ts`, `.js`, `.diff`, `.patch`, etc.) |
-| `GET` | `/api/reviews` | Retrieve paginated review history with summary metrics |
-| `GET` | `/api/reviews/{id}` | Fetch full review report including persisted diff and findings |
-| `DELETE` | `/api/reviews/{id}` | Permanently delete a review record |
-| `GET` | `/api/health` | Service health, database status, and LLM availability check |
-
-### Sample Request: `POST /api/reviews`
-```json
-{
-  "diff_content": "def calculate_discount(price, pct):\n-   return price * pct\n+   return price - (price * pct / 100)",
-  "focus": "bugs",
-  "language": "Python",
-  "filename": "discount.py"
-}
-```
-
-### Sample Response:
-```json
-{
-  "id": "e7b0e4f2-95f3-4e4b-97e3-0599a091bfa3",
-  "created_at": "2026-11-14T08:30:00Z",
-  "filename": "discount.py",
-  "processing_time_seconds": 0.42,
-  "result": {
-    "summary": "Review complete. Checked arithmetic calculations and division safeguards.",
-    "overall_status": "approved",
-    "risk_level": "low",
-    "files_reviewed": 1,
-    "findings": [],
-    "llm_available": true
-  }
-}
-```
-
----
-
-## 🧪 Test Suite & Quality Assurance
-
-The codebase includes full unit and integration test coverage:
-
-```bash
-cd backend
-python3 -m pytest tests/ -v
-```
-
-### Test Coverage Breakdown (47 / 47 Tests Passing):
-- **`tests/test_diff_parser.py` (6 tests)**: Validates unified diff parsing, single-line additions, deletions, context line indexing, multi-hunk tracking, and invalid diff error handling.
-- **`tests/test_pattern_detector.py` (8 tests)**: Validates deterministic regex rules for SQL injection variants (f-strings, string concatenation, `.format()`), dangerous `eval()`/`exec()`, `pickle.loads()`, `os.system()`, hardcoded API keys/passwords, and `subprocess(shell=True)`.
-- **`tests/test_review_validator.py` (15 tests)**: Verifies root-cause duplicate detection across different titles, sorting by severity, risk level escalation rules, assumption sanitization, accurate summary generation without false unit test claims, and unique finding ID generation.
-- **`tests/test_fix_validator.py` (10 tests)**: Tests suggested fix validation: rejects fixes identical to original buggy code, rejects placeholder comments/pass, rejects fixes that retain SQL injection or inverted discount math, and accepts valid guarded fixes.
-- **`tests/test_api.py` (8 tests)**: End-to-end FastAPI endpoint testing (creation, retrieval, history listing, deletion, upload size limit enforcement, and health checks) using an isolated in-memory SQLite database.
-
-Frontend static analysis:
-```bash
-cd frontend
-./node_modules/.bin/tsc --noEmit
-```
-*(0 errors, strict TypeScript mode enabled).*
-
----
-
-## 📂 Project Structure
-
-```
-codelens-ai/
-├── README.md                           # Master documentation
-├── .gitignore                          # Git ignore specification
-├── sample_diffs/                       # CLI demonstration diff files
-│   ├── sql_injection.diff
-│   ├── python_logic_bug.diff
-│   └── missing_tests.diff
-│
-├── backend/                            # FastAPI Application
-│   ├── requirements.txt                # Python dependencies
-│   ├── codelens.db                     # SQLite database (auto-generated)
-│   ├── app/
-│   │   ├── main.py                     # App factory, CORS, router mounting
-│   │   ├── config.py                   # Pydantic BaseSettings & env configs
-│   │   ├── agents/
-│   │   │   └── code_review_agent.py    # Multi-pass review orchestrator
-│   │   ├── tools/
-│   │   │   ├── diff_parser.py          # Unified diff parser & line indexer
-│   │   │   ├── pattern_detector.py     # 15+ deterministic security rules
-│   │   │   ├── fix_validator.py        # Remediation fix validator & sanitizer
-│   │   │   ├── code_inspector.py       # Code chunking & context formatter
-│   │   │   └── review_validator.py     # Deduplication, risk escalation & summary engine
-│   │   ├── services/
-│   │   │   └── llm_service.py          # Ollama client with dynamic model discovery & 3-tier JSON extraction
-│   │   ├── schemas/
-│   │   │   ├── review.py               # Request & response contracts
-│   │   │   └── findings.py             # Finding (#CL-...), Severity, Status models
-│   │   ├── database/
-│   │   │   ├── connection.py           # aiosqlite connection & schema migrations
-│   │   │   └── crud.py                 # Async database queries
-│   │   └── api/
-│   │       └── routes/
-│   │           ├── reviews.py          # Review creation, history & upload endpoints
-│   │           └── health.py           # Health check & system diagnostics
-│   └── tests/                          # 47 passing pytest suites
-│       ├── test_diff_parser.py
-│       ├── test_pattern_detector.py
-│       ├── test_review_validator.py
-│       ├── test_fix_validator.py
-│       └── test_api.py
-│
-└── frontend/                           # React 19 + TypeScript + Vite SPA
-    ├── package.json
-    ├── vite.config.ts
-    ├── index.html
-    └── src/
-        ├── main.tsx
-        ├── App.tsx                     # Layout & React Router 7 setup
-        ├── types/                      # TypeScript review interfaces
-        ├── context/
-        │   └── ToastContext.tsx        # Linear-style floating glass notification pill
-        ├── components/
-        │   ├── InlineCodeReview.tsx    # Devin AI / GitHub PR-style code review viewer
-        │   ├── FindingCard.tsx         # Finding cards with expandable remediation details
-        │   ├── Sidebar.tsx             # Sleek navigation with status indicator
-        │   ├── SeverityBadge.tsx       # Color-coded severity chips
-        │   └── StatusBadge.tsx         # Review decision chips (Approved, Changes Req)
-        ├── pages/
-        │   ├── NewReview.tsx           # Code editor with quick-load scenarios
-        │   ├── ReviewResults.tsx       # Inline code review & report dashboard
-        │   ├── Dashboard.tsx           # Global metrics & quick analytics
-        │   ├── History.tsx             # Paginated past review records
-        │   └── Settings.tsx            # Local LLM model & agent configurations
-        └── services/
-            └── api.ts                  # Axios client for backend endpoints
-```
-
----
-
-## 💡 Potential Interview Discussion Questions & Answers
-
-<details>
-<summary><b>Q1: Why did you choose SQLite over PostgreSQL for persistence?</b></summary>
-<br>
-CodeLens AI is architected as a local-first, zero-friction developer tool. SQLite (via async <code>aiosqlite</code>) enables an interviewer or engineer to clone the repository and run it instantly with zero Docker or database setup. The database layer is cleanly decoupled inside <code>app/database/crud.py</code>, making it trivial to swap to PostgreSQL with asyncpg for multi-tenant production deployments.
-</details>
-
-<details>
-<summary><b>Q2: How do you prevent LLMs from hallucinating incorrect line numbers?</b></summary>
-<br>
-We do not rely on the LLM to calculate line numbers from scratch. <code>diff_parser.py</code> parses unified diff hunks (<code>@@ -old +new @@</code>) and generates a line-by-line index of every added and context line in the target file. When the LLM outputs a finding, <code>review_validator.py</code> and <code>InlineCodeReview.tsx</code> cross-reference the line against the parsed hunk boundaries to ensure it maps to a real line in the changed file.
-</details>
-
-<details>
-<summary><b>Q3: How does the application scale to large diffs?</b></summary>
-<br>
-Large diffs pose two challenges: memory consumption and LLM context window limits. We enforce a 500 KB ceiling upfront in <code>code_review_agent.py</code>. Furthermore, <code>code_inspector.py</code> chunks changed files individually so each file can be reviewed in focused context windows.
-</details>
-
-<details>
-<summary><b>Q4: What happens if Ollama is not installed or offline?</b></summary>
-<br>
-The application employs <b>graceful degradation</b>. If Ollama is unreachable, <code>llm_service.py</code> catches connection errors in sub-milliseconds and returns a safe fallback with <code>llm_available = false</code>. The review still executes the deterministic security engine, ensuring critical vulnerabilities (SQLi, eval, hardcoded secrets) are caught immediately without failing the review.
-</details>
+| `POST` | `/api/reviews` | Submit a unified diff or source file for multi-pass review |
+| `POST` | `/api/reviews/upload` | Multipart file upload with chunked streaming size validation |
+| `GET` | `/api/reviews` | Retrieve review history with summary metrics |
+| `GET` | `/api/reviews/{id}` | Fetch full review report, persisted diff, and findings |
+| `DELETE` | `/api/reviews/{id}` | Delete a review record |
+| `GET` | `/api/health` | Health check and system diagnostics |
 
 ---
 
 ## 📄 License
-This project is open-source under the [MIT License](LICENSE). Built for the FlexGCC AI Engineer Evaluation.
+This project is open-source under the [MIT License](LICENSE).

@@ -1,3 +1,4 @@
+import os
 import re
 from typing import List, Optional, Set, Dict, Tuple
 from app.schemas.findings import Finding, ReviewResult
@@ -27,13 +28,10 @@ def _extract_keywords(text: str) -> Set[str]:
 
 
 def are_duplicate_findings(f1: Finding, f2: Finding) -> bool:
-    """
-    Determines if two findings represent the same root cause or overlapping issue.
-    """
+    """Determines if two findings represent the same root cause or overlapping issue."""
     if f1.file != f2.file:
         return False
 
-    # Check line proximity: exact same line, or adjacent lines within 1 line
     line_close = False
     if f1.line is not None and f2.line is not None:
         if abs(f1.line - f2.line) <= 1:
@@ -47,18 +45,15 @@ def are_duplicate_findings(f1: Finding, f2: Finding) -> bool:
     tokens1 = _extract_keywords(f"{f1.title} {f1.description} {f1.root_cause or ''}")
     tokens2 = _extract_keywords(f"{f2.title} {f2.description} {f2.root_cause or ''}")
 
-    # Check if both match any known root cause cluster
     for cluster in ROOT_CAUSE_CLUSTERS:
         if (tokens1 & cluster) and (tokens2 & cluster):
             return True
 
-    # Check if they share significant title keywords
     title_tokens1 = _extract_keywords(f1.title) - {"issue", "bug", "error", "via", "in", "on", "a", "the", "and", "or"}
     title_tokens2 = _extract_keywords(f2.title) - {"issue", "bug", "error", "via", "in", "on", "a", "the", "and", "or"}
     if len(title_tokens1 & title_tokens2) >= 1 and (f1.line == f2.line):
         return True
 
-    # If on exact same line and same category
     if f1.line == f2.line and f1.line is not None and f1.category == f2.category:
         return True
 
@@ -70,48 +65,47 @@ def merge_duplicate_findings(base: Finding, incoming: Finding, original_code: Op
     Merges two overlapping findings, preserving the highest severity, highest confidence,
     most useful explanation, and validated suggested fix.
     """
-    # 1. Highest severity
     sev = base.severity if SEVERITY_ORDER.get(base.severity, 4) <= SEVERITY_ORDER.get(incoming.severity, 4) else incoming.severity
-
-    # 2. Highest confidence
     conf = max(base.confidence, incoming.confidence)
 
-    # 3. Prefer deterministic or more detailed title
     title = base.title
     if len(incoming.title) > len(base.title) and ("via" in incoming.title or "potential" in incoming.title.lower()):
         title = incoming.title
 
-    # 4. Root cause: prefer the more descriptive one
     rc1 = base.root_cause or base.description
     rc2 = incoming.root_cause or incoming.description
     root_cause = rc1 if len(rc1) >= len(rc2) else rc2
 
-    # 5. Description & Impact
     desc = base.description if len(base.description) >= len(incoming.description) else incoming.description
     impact = base.impact if len(base.impact) >= len(incoming.impact) else incoming.impact
     rec = base.recommendation if len(base.recommendation) >= len(incoming.recommendation) else incoming.recommendation
 
-    # 6. Suggested Fix: validate both against original code!
-    fix1, reason1 = validate_suggested_fix(base, original_code)
-    fix2, reason2 = validate_suggested_fix(incoming, original_code)
+    val1 = validate_suggested_fix(base, original_code, file_path=base.file)
+    val2 = validate_suggested_fix(incoming, original_code, file_path=incoming.file)
 
     best_fix = None
-    if fix1 and fix2:
-        best_fix = fix1 if len(fix1) >= len(fix2) else fix2
-    elif fix1:
-        best_fix = fix1
-    elif fix2:
-        best_fix = fix2
+    fix_status = "proposed"
+    if val1[0] and val2[0]:
+        if len(val1[0]) >= len(val2[0]):
+            best_fix = val1[0]
+            fix_status = val1.fix_status
+        else:
+            best_fix = val2[0]
+            fix_status = val2.fix_status
+    elif val1[0]:
+        best_fix = val1[0]
+        fix_status = val1.fix_status
+    elif val2[0]:
+        best_fix = val2[0]
+        fix_status = val2.fix_status
     else:
         best_fix = None
-        rejection = reason1 or reason2
+        fix_status = "rejected"
+        rejection = val1[1] or val2[1]
         if rejection and rejection not in rec:
             rec = f"{rec} (Note on suggested fix: {rejection})"
 
-    # 7. Line number: prefer non-None line
     line = base.line if base.line is not None else incoming.line
-
-    # 8. Evidence: prefer non-empty evidence
     evidence = base.evidence or incoming.evidence
 
     return Finding(
@@ -128,6 +122,7 @@ def merge_duplicate_findings(base: Finding, incoming: Finding, original_code: Op
         recommendation=rec,
         suggested_fix=best_fix,
         confidence=conf,
+        fix_verification_status=fix_status,
     )
 
 
@@ -141,7 +136,7 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
 
     has_tier = any(k in text for k in ("premium", "regular", "user_type", "tier", "gold", "silver", "vip", "cashback"))
     has_arbitrary_val = bool(re.search(r'\b(?:should be|set to|change to|must be)\s*(?:10%?|15%?|25%?|30%?|50%?|12\.5%?)\b', text, re.IGNORECASE))
-    
+
     arbitrary_fix = False
     if finding.suggested_fix and has_tier:
         if re.search(r'return\s+(?:10|15|25|30|50|0\.125)\b', finding.suggested_fix):
@@ -158,59 +153,139 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
             "Verify the intended tier discount policy with product requirements before modifying discount rates."
         )
         finding.suggested_fix = None
+        finding.fix_verification_status = "rejected"
         finding.root_cause = "Tier discount rates appear arbitrary, but exact business requirements are unspecified."
 
     return finding
 
 
-def sanitize_hallucinated_zerodivision(finding: Finding, orig_code: Optional[str]) -> Optional[Finding]:
+def validate_source_evidence(
+    finding: Finding,
+    diff_files: Optional[List[DiffFile]],
+    file_lines: Dict[str, Dict[int, str]],
+    file_all_code: Dict[str, str],
+) -> Tuple[bool, Optional[Finding], Optional[str]]:
     """
-    Validates ZeroDivision findings. If a finding claims ZeroDivisionError, but the target code
-    contains no division operator ('/' or '//' or '%'), it is an LLM hallucination
-    (e.g. confusing multiplication by a decimal like 0.125 or 0 with division).
+    Strictly validates finding against actual source code and diff.
+    Verifies:
+    1. Referenced file exists in diff.
+    2. Reported line number exists in file.
+    3. Evidence corresponds to the actual source line.
+    4. Rejects false ZeroDivision claims where no division operator exists or denominator cannot be zero.
+    5. Rejects false SQL injection where query is parameterized.
+    6. Rejects false eval on ast.literal_eval.
+    7. Rejects false credential on os.getenv / environment lookup.
     """
+    if not diff_files:
+        # If no diff files provided, cannot cross-check diff structure
+        return True, finding, None
+
+    # Step 1: Match file in diff
+    matched_file_key = None
+    finding_file_base = os.path.basename(finding.file)
+    for df_key in file_lines.keys():
+        if df_key == finding.file or os.path.basename(df_key) == finding_file_base:
+            matched_file_key = df_key
+            break
+
+    if not matched_file_key:
+        return False, None, f"Referenced file '{finding.file}' does not exist in the submitted diff."
+
+    # Normalize file path in finding to match diff
+    finding.file = matched_file_key
+    lines_in_file = file_lines[matched_file_key]
+    full_code = file_all_code.get(matched_file_key, "")
+
+    # Step 2: Line number verification
+    if finding.line is not None:
+        if finding.line not in lines_in_file:
+            # Check if evidence matches another line in this file
+            if finding.evidence and finding.evidence.strip():
+                norm_ev = normalize_code(finding.evidence)
+                matched_line = None
+                for l_num, l_content in lines_in_file.items():
+                    if norm_ev and (norm_ev in normalize_code(l_content) or normalize_code(l_content) in norm_ev):
+                        matched_line = l_num
+                        break
+                if matched_line:
+                    finding.line = matched_line
+                else:
+                    return False, None, f"Line {finding.line} does not exist in '{finding.file}' and evidence cannot be verified."
+
+    # Step 3: Evidence verification against actual code
+    actual_code = lines_in_file.get(finding.line, "") if finding.line else ""
+    if finding.evidence and finding.evidence.strip():
+        norm_ev = normalize_code(finding.evidence)
+        norm_actual = normalize_code(actual_code)
+
+        # Check surrounding +/- 2 lines if line offset slightly
+        if norm_actual and norm_ev not in norm_actual and norm_actual not in norm_ev:
+            nearby_match = False
+            if finding.line:
+                for offset in (-2, -1, 1, 2):
+                    adj_code = lines_in_file.get(finding.line + offset, "")
+                    if norm_ev in normalize_code(adj_code) or normalize_code(adj_code) in norm_ev:
+                        finding.line = finding.line + offset
+                        actual_code = adj_code
+                        nearby_match = True
+                        break
+            if not nearby_match and norm_ev not in normalize_code(full_code):
+                # Evidence does not exist in the file at all -> Hallucinated evidence
+                return False, None, f"Evidence '{finding.evidence.strip()}' does not exist in file '{finding.file}'."
+    elif actual_code:
+        # Populate actual evidence from source code (never invent fake code)
+        finding.evidence = actual_code.strip()
+
+    # Step 4: Semantic sanity checks on specific vulnerability claims
+
+    # 4a. ZeroDivisionError verification
     text = f"{finding.title} {finding.description}".lower()
     if "zerodivision" in text or "division by zero" in text:
-        code = (finding.evidence or orig_code or "").strip()
-        # If code line has no division operator, reject or reframe
-        if code and not any(op in code for op in ("/", "//", "%", "div")):
-            if any(k in (code + " " + text).lower() for k in ("tier", "gold", "vip", "spend", "cashback")):
-                finding.title = "Unverified Tier Reward Policy Discrepancy"
-                finding.category = "bug"
-                finding.severity = "medium"
-                finding.description = (
-                    "Function implements tier-based reward calculation with a hardcoded multiplier. "
-                    "Business requirements and exact reward percentages were not formally documented. "
-                    "Avoid assuming arbitrary tier values without confirmation."
-                )
-                finding.root_cause = "Hardcoded reward multiplier without product specification"
-                finding.impact = "Applying arbitrary rewards without specification can cause customer billing or financial discrepancies."
-                finding.recommendation = "Confirm intended tier reward percentages with product team before implementation."
-                finding.suggested_fix = None
-                return finding
-            return None
-    return finding
+        context_window = actual_code
+        if finding.line:
+            surrounding = [lines_in_file.get(finding.line + o, "") for o in range(-2, 3)]
+            context_window = " ".join(surrounding)
 
+        # Check if code actually contains division / modulo operators
+        has_division = bool(re.search(r'/(?!/|\*)|\bdiv\b|%', context_window))
+        if not has_division:
+            # Code does NOT divide! E.g. multiplication 'total_spend * 0.125'
+            return False, None, f"ZeroDivisionError finding rejected: code at line {finding.line} does not contain division."
 
-def sanitize_hallucinated_average_finding(finding: Finding) -> Finding:
-    """
-    Corrects severe LLM hallucination claiming an average should be calculated using multiplication.
-    The real defect in unvalidated average calculation is ZeroDivisionError on empty input.
-    """
-    text = f"{finding.title} {finding.description} {finding.recommendation}".lower()
-    if "average" in text and ("multiply" in text or "multiplication" in text):
-        finding.title = "Potential ZeroDivisionError in calculate_average"
-        finding.category = "bug"
-        finding.severity = "high"
-        finding.description = (
-            "Calling calculate_average with an empty list or collection will cause a ZeroDivisionError "
-            "when dividing by len(values) or count = 0."
+        # Check if denominator is a non-zero literal constant (e.g. / 100, / 2, / 1000)
+        literal_denom = re.search(r'/\s*([0-9]+(?:\.[0-9]+)?)\b', actual_code)
+        if literal_denom and float(literal_denom.group(1)) != 0.0:
+            return False, None, f"ZeroDivisionError finding rejected: denominator is non-zero literal {literal_denom.group(1)}."
+
+        # Check if division is already guarded by an upfront check
+        if any(guard in full_code.lower() for guard in ("if not ", "if len(", "if count ==", "== 0: return", "<= 0: return")):
+            # If the specific function already has a guard on the same variable, reject
+            m_len = re.search(r'/\s*len\(\s*(\w+)\s*\)', actual_code)
+            if m_len:
+                var = m_len.group(1)
+                if f"if not {var}" in full_code or f"len({var}) == 0" in full_code or f"len({var}) <= 0" in full_code:
+                    return False, None, f"ZeroDivisionError finding rejected: guarded against empty {var}."
+
+    # 4b. SQL injection check: do not flag safe parameterized queries
+    if ("sql injection" in text or "sqli" in text) and actual_code:
+        # Parameterized query with placeholders (?, %s, $1) and tuple/list argument
+        is_safe_param = bool(
+            re.search(r'\.execute\(\s*["\'][^"\']*(?:\?|%s|\$1)[^"\']*["\']\s*,\s*(?:\([^)]+\)|\[[^\]]+\]|\w+)\s*\)', actual_code)
         )
-        finding.root_cause = "Division by zero when input values collection is empty"
-        finding.impact = "Calling calculate_average([]) crashes the process with ZeroDivisionError."
-        finding.recommendation = "Add an upfront guard: if not values: return 0.0 before performing division."
-        finding.suggested_fix = "if not values:\n    return 0.0\ntotal = sum(values)\ncount = len(values)\nreturn total / count"
-    return finding
+        has_fstring_or_concat = bool(re.search(r'f["\']|\.format\(|\+\s*\w+', actual_code))
+        if is_safe_param and not has_fstring_or_concat:
+            return False, None, f"SQL injection finding rejected: parameterized query on line {finding.line} is safe."
+
+    # 4c. Eval check: do not flag ast.literal_eval
+    if "eval" in text and "literal_eval" in actual_code and "ast.literal_eval" in actual_code:
+        return False, None, f"eval finding rejected: ast.literal_eval is safe."
+
+    # 4d. Hardcoded credential check: do not flag os.getenv / os.environ
+    if any(k in text for k in ("hardcoded", "credential", "secret", "api_key")) and actual_code:
+        if "os.getenv(" in actual_code or "os.environ" in actual_code or "environ.get(" in actual_code:
+            return False, None, f"Hardcoded credential finding rejected: reading from environment variable."
+
+    return True, finding, None
 
 
 def build_accurate_summary(
@@ -218,12 +293,12 @@ def build_accurate_summary(
     findings: List[Finding],
     has_tests: bool,
     diff_files: Optional[List[DiffFile]] = None,
+    unverified_count: int = 0,
 ) -> Tuple[str, List[str], List[str]]:
     """
     Generates an accurate summary, missing_tests list, and positive_observations,
     ensuring no false claims about unit tests existing when none were provided.
     """
-    # 1. Sanitize positive observations: remove any hallucinated claims about tests existing
     clean_positives = []
     for obs in llm_result.positive_observations:
         obs_lower = obs.lower()
@@ -231,7 +306,6 @@ def build_accurate_summary(
             continue
         clean_positives.append(obs)
 
-    # 2. Build or refine missing_tests
     missing_tests = list(llm_result.missing_tests)
     if not has_tests:
         if findings:
@@ -247,14 +321,16 @@ def build_accurate_summary(
                 if df.new_path and df.new_path != "/dev/null":
                     missing_tests.append(f"No unit tests supplied for {df.new_path} — logic lacks automated test coverage.")
 
-    # 3. Create accurate summary
     crit_count = sum(1 for f in findings if f.severity == "critical")
     high_count = sum(1 for f in findings if f.severity == "high")
     med_count = sum(1 for f in findings if f.severity == "medium")
     total = len(findings)
 
     if total == 0:
-        summary = "Review complete: No critical bugs or security risks detected in changed code."
+        if not llm_result.llm_available or getattr(llm_result, "partial_analysis", False):
+            summary = "Static inspection complete. LLM semantic analysis was offline (partial review)."
+        else:
+            summary = "Review complete: No critical bugs or security risks detected in changed code."
         if not has_tests:
             summary += " Note: No automated unit tests were included in this changeset."
     else:
@@ -280,9 +356,13 @@ def validate_and_merge(
     deterministic_findings: List[Finding],
     diff_files: Optional[List[DiffFile]] = None,
 ) -> ReviewResult:
-    """Merges and deduplicates findings, validating fixes, sanitizing assumptions, and ensuring summary accuracy."""
-    # Build code line index for evidence extraction and fix validation
+    """
+    Validates, deduplicates, and merges findings across static and semantic analysis.
+    Performs source evidence verification, fix validation, and summary generation.
+    """
     line_map: Dict[Tuple[str, int], str] = {}
+    file_lines: Dict[str, Dict[int, str]] = {}
+    file_all_code: Dict[str, str] = {}
     has_tests = False
 
     if diff_files:
@@ -290,40 +370,40 @@ def validate_and_merge(
             file_name = df.new_path
             if "test" in file_name.lower():
                 has_tests = True
+
+            lines_dict: Dict[int, str] = {}
+            full_lines: List[str] = []
+
             for hunk in df.hunks:
                 for dl in hunk.lines:
                     if dl.line_number is not None:
                         line_map[(file_name, dl.line_number)] = dl.content
+                        lines_dict[dl.line_number] = dl.content
+                        full_lines.append(dl.content)
                         if "def test_" in dl.content or "assert " in dl.content:
                             has_tests = True
 
-    # Pool all findings (deterministic first for priority)
+            file_lines[file_name] = lines_dict
+            file_all_code[file_name] = "\n".join(full_lines)
+
+    # Pool raw findings: deterministic first
     raw_findings = list(deterministic_findings) + list(llm_result.findings)
     merged: List[Finding] = []
+    unverified_count = 0
 
     for f in raw_findings:
-        # Correct known mathematical hallucinations (e.g. LLM claiming average is multiplication)
-        f = sanitize_hallucinated_average_finding(f)
+        # Step A: Validate finding against source code and diff
+        valid, validated_f, reject_reason = validate_source_evidence(
+            f, diff_files, file_lines, file_all_code
+        )
+        if not valid or validated_f is None:
+            unverified_count += 1
+            continue
 
+        f = validated_f
         orig_code = line_map.get((f.file, f.line or 0)) if f.line else None
 
-        # Sanitize false ZeroDivision claims on code that has no division operator
-        sanitized_zero = sanitize_hallucinated_zerodivision(f, orig_code)
-        if sanitized_zero is None:
-            continue
-        f = sanitized_zero
-
-        # If line points to a comment line or blank line, advance to the next executable statement
-        if f.line and (not orig_code or not orig_code.strip() or orig_code.strip().startswith("#")):
-            for offset in (1, 2, 3):
-                next_code = line_map.get((f.file, f.line + offset))
-                if next_code and next_code.strip() and not next_code.strip().startswith("#"):
-                    f.line = f.line + offset
-                    orig_code = next_code
-                    f.evidence = next_code.strip()
-                    break
-
-        # Drop findings that describe a bug in removed code that the author already fixed in this diff
+        # Step B: Drop findings that describe a bug in removed code that the author already fixed
         if diff_files and f.line:
             was_removed_and_fixed = False
             for df in diff_files:
@@ -332,26 +412,23 @@ def validate_and_merge(
                         removed_texts = [dl.content.strip() for dl in hunk.lines if dl.change_type == "removed" and dl.content.strip()]
                         added_texts = [dl.content.strip() for dl in hunk.lines if dl.change_type == "added" and dl.content.strip()]
                         if any(rem in (f.evidence or "") or rem in f.description for rem in removed_texts):
-                            # The bug was in the removed line, and new code was added replacing it
                             if added_texts and not any(rem in add for rem in removed_texts for add in added_texts):
                                 was_removed_and_fixed = True
                                 break
             if was_removed_and_fixed:
                 continue
 
-        if not f.evidence and orig_code:
-            f.evidence = orig_code.strip()
+        # Step C: Validate suggested fix against original code & language syntax
+        val_res = validate_suggested_fix(f, orig_code, file_path=f.file)
+        f.suggested_fix = val_res[0]
+        f.fix_verification_status = val_res.fix_status
+        if val_res[1] and not val_res[0] and val_res[1] not in f.recommendation:
+            f.recommendation = f"{f.recommendation} (Note: {val_res[1]})"
 
-        # Validate suggested fix against original code
-        valid_fix, rejection_reason = validate_suggested_fix(f, orig_code)
-        f.suggested_fix = valid_fix
-        if rejection_reason and not valid_fix and rejection_reason not in f.recommendation:
-            f.recommendation = f"{f.recommendation} (Note: {rejection_reason})"
-
-        # Sanitize unsupported business assumptions
+        # Step D: Sanitize unsupported business assumptions (e.g. arbitrary discount rates)
         f = sanitize_unsupported_assumptions(f)
 
-        # Check for duplicates / overlaps in merged list
+        # Step E: Deduplication
         found_dup_idx = -1
         for i, existing in enumerate(merged):
             if are_duplicate_findings(existing, f):
@@ -359,7 +436,6 @@ def validate_and_merge(
                 break
 
         if found_dup_idx >= 0:
-            # Merge with existing finding, keeping best explanation & fix
             merged[found_dup_idx] = merge_duplicate_findings(merged[found_dup_idx], f, orig_code)
         else:
             merged.append(f)
@@ -367,7 +443,7 @@ def validate_and_merge(
     # Sort findings by severity
     merged.sort(key=lambda x: SEVERITY_ORDER.get(x.severity, 4))
 
-    # Update risk level based on highest finding severity
+    # Determine risk level
     if any(f.severity == "critical" for f in merged):
         risk_level = "critical"
     elif any(f.severity == "high" for f in merged):
@@ -375,14 +451,26 @@ def validate_and_merge(
     elif any(f.severity == "medium" for f in merged):
         risk_level = "medium"
     else:
-        risk_level = llm_result.risk_level
+        # If partial analysis and no findings, do not claim low risk unconditionally
+        if getattr(llm_result, "partial_analysis", False) or not llm_result.llm_available:
+            risk_level = "medium"
+        else:
+            risk_level = llm_result.risk_level
 
-    overall_status = "changes_requested" if merged else llm_result.overall_status
+    # Determine overall status
+    if merged:
+        overall_status = "changes_requested"
+    elif getattr(llm_result, "partial_analysis", False) or not llm_result.llm_available:
+        overall_status = "needs_attention"
+    else:
+        overall_status = llm_result.overall_status
 
-    # Build accurate summary without false test claims
+    # Build accurate summary
     summary, missing_tests, clean_positives = build_accurate_summary(
-        llm_result, merged, has_tests, diff_files=diff_files
+        llm_result, merged, has_tests, diff_files=diff_files, unverified_count=unverified_count
     )
+
+    is_partial = getattr(llm_result, "partial_analysis", False) or not llm_result.llm_available
 
     return llm_result.model_copy(
         update={
@@ -393,5 +481,7 @@ def validate_and_merge(
             "overall_status": overall_status,
             "missing_tests": missing_tests,
             "positive_observations": clean_positives,
+            "partial_analysis": is_partial,
+            "unverified_findings_count": unverified_count,
         }
     )

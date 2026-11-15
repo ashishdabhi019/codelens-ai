@@ -394,14 +394,42 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                 justifyContent: 'space-between',
                 marginBottom: '5px',
               }}>
-                <span style={{
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  color: '#58a6ff',
-                  fontFamily: "'Inter', sans-serif",
-                }}>
-                  Recommended fix:
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#58a6ff',
+                    fontFamily: "'Inter', sans-serif",
+                  }}>
+                    Recommended fix:
+                  </span>
+                  {finding.fix_verification_status === 'validated_syntax' && (
+                    <span style={{
+                      fontSize: '10px',
+                      color: '#4ade80',
+                      background: 'rgba(74, 222, 128, 0.12)',
+                      border: '1px solid rgba(74, 222, 128, 0.3)',
+                      padding: '1px 6px',
+                      borderRadius: '3px',
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}>
+                      Validated Syntax
+                    </span>
+                  )}
+                  {finding.fix_verification_status === 'proposed' && (
+                    <span style={{
+                      fontSize: '10px',
+                      color: '#fbbf24',
+                      background: 'rgba(251, 191, 36, 0.12)',
+                      border: '1px solid rgba(251, 191, 36, 0.3)',
+                      padding: '1px 6px',
+                      borderRadius: '3px',
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}>
+                      Proposed Fix
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => copyToClipboard(finding.suggested_fix!, typeof cardKey === 'number' ? cardKey : 999, finding.title)}

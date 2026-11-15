@@ -161,6 +161,34 @@ export function FindingCard({ finding }: { finding: Finding }) {
             >
               {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
               <span>Suggested Fix</span>
+              {finding.fix_verification_status === 'validated_syntax' && (
+                <span style={{
+                  fontSize: '9.5px',
+                  color: '#4ade80',
+                  background: 'rgba(74, 222, 128, 0.12)',
+                  border: '1px solid rgba(74, 222, 128, 0.3)',
+                  padding: '1px 5px',
+                  borderRadius: '3px',
+                  fontFamily: 'JetBrains Mono, monospace',
+                  marginLeft: '4px',
+                }}>
+                  Validated
+                </span>
+              )}
+              {finding.fix_verification_status === 'proposed' && (
+                <span style={{
+                  fontSize: '9.5px',
+                  color: '#fbbf24',
+                  background: 'rgba(251, 191, 36, 0.12)',
+                  border: '1px solid rgba(251, 191, 36, 0.3)',
+                  padding: '1px 5px',
+                  borderRadius: '3px',
+                  fontFamily: 'JetBrains Mono, monospace',
+                  marginLeft: '4px',
+                }}>
+                  Proposed
+                </span>
+              )}
             </button>
 
             {expanded && (

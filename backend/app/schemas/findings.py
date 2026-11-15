@@ -26,6 +26,8 @@ class Finding(BaseModel):
     recommendation: str
     suggested_fix: Optional[str] = None
     confidence: float = Field(ge=0.0, le=1.0, default=0.8)
+    reproduction_scenario: Optional[str] = None
+    fix_verification_status: Literal["validated_syntax", "passed_tests", "proposed", "rejected"] = "proposed"
 
     @model_validator(mode="before")
     @classmethod
@@ -89,7 +91,12 @@ class Finding(BaseModel):
             if not isinstance(fix, str) or not fix.strip():
                 data["suggested_fix"] = None
 
-        # 7. Fallbacks for required text fields
+        # 7. Normalize fix verification status
+        fvs = str(data.get("fix_verification_status", "proposed")).lower().strip()
+        fvs_valid = {"validated_syntax", "passed_tests", "proposed", "rejected"}
+        data["fix_verification_status"] = fvs if fvs in fvs_valid else "proposed"
+
+        # 8. Fallbacks for required text fields
         data.setdefault("title", "Detected Code Issue")
         data.setdefault("description", "Potential code issue identified in change.")
         data.setdefault("impact", "May cause unexpected behavior or failure in execution.")
@@ -104,6 +111,8 @@ class Finding(BaseModel):
         if not self.root_cause and self.description:
             # First sentence as fallback root cause
             self.root_cause = self.description.split(".")[0].strip()
+        if not self.reproduction_scenario and self.impact:
+            self.reproduction_scenario = self.impact
         return self
 
 
@@ -117,6 +126,8 @@ class ReviewResult(BaseModel):
     positive_observations: List[str] = []
     deterministic_findings: List[Finding] = []
     llm_available: bool = True
+    partial_analysis: bool = False
+    unverified_findings_count: int = 0
 
     @model_validator(mode="before")
     @classmethod

@@ -224,10 +224,10 @@ export function ReviewResults() {
         </div>
       </div>
 
-      {!result.llm_available && (
+      {(!result.llm_available || result.partial_analysis) && (
         <div style={{
-          background: '#121217',
-          border: '1px solid #282834',
+          background: 'rgba(245, 158, 11, 0.08)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
           borderRadius: '7px',
           padding: '10px 14px',
           display: 'flex',
@@ -237,11 +237,11 @@ export function ReviewResults() {
           marginBottom: '20px',
           width: '100%',
           boxSizing: 'border-box',
-          color: '#a1a1aa',
+          color: '#fbbf24',
         }}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#fbbf24', display: 'inline-block', flexShrink: 0 }} />
+          <AlertTriangle size={15} color="#fbbf24" style={{ flexShrink: 0 }} />
           <span>
-            <strong style={{ color: '#ffffff' }}>Deterministic Engine Active:</strong> AST security rules & pattern checkers scanned this file. (Local Ollama LLM is optional/offline).
+            <strong style={{ color: '#ffffff' }}>Partial Review:</strong> LLM semantic analysis was offline or unreachable. Review completed with deterministic AST static rules.
           </span>
         </div>
       )}

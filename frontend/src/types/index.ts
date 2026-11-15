@@ -12,6 +12,8 @@ export interface Finding {
   recommendation: string;
   suggested_fix?: string;
   confidence: number;
+  reproduction_scenario?: string;
+  fix_verification_status?: 'validated_syntax' | 'passed_tests' | 'proposed' | 'rejected';
 }
 
 export interface ReviewResult {
@@ -24,6 +26,8 @@ export interface ReviewResult {
   positive_observations: string[];
   deterministic_findings: Finding[];
   llm_available: boolean;
+  partial_analysis?: boolean;
+  unverified_findings_count?: number;
 }
 
 export interface ReviewResponse {
