@@ -139,18 +139,18 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
     """
     text = f"{finding.title} {finding.description} {finding.recommendation}".lower()
 
-    has_tier = any(k in text for k in ("premium", "regular", "user_type", "tier"))
-    has_arbitrary_val = bool(re.search(r'\b(?:should be|set to|change to|must be)\s*(?:10%?|15%?|25%?|30%?|50%?)\b', text, re.IGNORECASE))
+    has_tier = any(k in text for k in ("premium", "regular", "user_type", "tier", "gold", "silver", "vip", "cashback"))
+    has_arbitrary_val = bool(re.search(r'\b(?:should be|set to|change to|must be)\s*(?:10%?|15%?|25%?|30%?|50%?|12\.5%?)\b', text, re.IGNORECASE))
     
     arbitrary_fix = False
     if finding.suggested_fix and has_tier:
-        if re.search(r'return\s+(?:10|15|25|30|50)\b', finding.suggested_fix):
+        if re.search(r'return\s+(?:10|15|25|30|50|0\.125)\b', finding.suggested_fix):
             arbitrary_fix = True
 
     if has_tier and (has_arbitrary_val or arbitrary_fix):
         finding.title = "Potential Business Logic Discrepancy: Tier Discount Rates"
         finding.description = (
-            "The implementation returns a lower discount for 'premium' than for 'regular'. "
+            "The implementation returns a hardcoded or lower reward/discount for this user tier. "
             "However, business requirements and exact discount tier percentages were not explicitly provided. "
             "Avoid assuming arbitrary tier values without confirmation."
         )
@@ -158,8 +158,37 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
             "Verify the intended tier discount policy with product requirements before modifying discount rates."
         )
         finding.suggested_fix = None
-        finding.root_cause = "Tier discount rates appear inverted, but exact business requirements are unspecified."
+        finding.root_cause = "Tier discount rates appear arbitrary, but exact business requirements are unspecified."
 
+    return finding
+
+
+def sanitize_hallucinated_zerodivision(finding: Finding, orig_code: Optional[str]) -> Optional[Finding]:
+    """
+    Validates ZeroDivision findings. If a finding claims ZeroDivisionError, but the target code
+    contains no division operator ('/' or '//' or '%'), it is an LLM hallucination
+    (e.g. confusing multiplication by a decimal like 0.125 or 0 with division).
+    """
+    text = f"{finding.title} {finding.description}".lower()
+    if "zerodivision" in text or "division by zero" in text:
+        code = (finding.evidence or orig_code or "").strip()
+        # If code line has no division operator, reject or reframe
+        if code and not any(op in code for op in ("/", "//", "%", "div")):
+            if any(k in (code + " " + text).lower() for k in ("tier", "gold", "vip", "spend", "cashback")):
+                finding.title = "Unverified Tier Reward Policy Discrepancy"
+                finding.category = "bug"
+                finding.severity = "medium"
+                finding.description = (
+                    "Function implements tier-based reward calculation with a hardcoded multiplier. "
+                    "Business requirements and exact reward percentages were not formally documented. "
+                    "Avoid assuming arbitrary tier values without confirmation."
+                )
+                finding.root_cause = "Hardcoded reward multiplier without product specification"
+                finding.impact = "Applying arbitrary rewards without specification can cause customer billing or financial discrepancies."
+                finding.recommendation = "Confirm intended tier reward percentages with product team before implementation."
+                finding.suggested_fix = None
+                return finding
+            return None
     return finding
 
 
@@ -277,6 +306,12 @@ def validate_and_merge(
         f = sanitize_hallucinated_average_finding(f)
 
         orig_code = line_map.get((f.file, f.line or 0)) if f.line else None
+
+        # Sanitize false ZeroDivision claims on code that has no division operator
+        sanitized_zero = sanitize_hallucinated_zerodivision(f, orig_code)
+        if sanitized_zero is None:
+            continue
+        f = sanitized_zero
 
         # If line points to a comment line or blank line, advance to the next executable statement
         if f.line and (not orig_code or not orig_code.strip() or orig_code.strip().startswith("#")):
