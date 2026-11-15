@@ -15,9 +15,12 @@ def inspect_changed_code(diff_files: List[DiffFile]) -> Dict[str, str]:
             header = f"# Lines {hunk.new_start}-{hunk.new_start + hunk.new_count}:\n"
             body = []
             for dl in hunk.lines:
-                prefix = "+" if dl.change_type == "added" else ("-" if dl.change_type == "removed" else " ")
-                ln = str(dl.line_number) if dl.line_number is not None else "?"
-                body.append(f"  {prefix} [{ln}] {dl.content}")
+                if dl.change_type == "removed":
+                    body.append(f"  - [DELETED OLD CODE - DO NOT REVIEW] {dl.content}")
+                elif dl.change_type == "added":
+                    body.append(f"  + [Line {dl.line_number}] {dl.content}")
+                else:
+                    body.append(f"    [Line {dl.line_number}] {dl.content}")
 
             hunk_blocks.append(header + "\n".join(body))
 

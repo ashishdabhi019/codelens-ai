@@ -137,12 +137,62 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
 
   const rawLines = displayCode.split('\n');
 
+  interface ParsedLine {
+    rawIndex: number;
+    rawText: string;
+    cleanText: string;
+    isAdd: boolean;
+    isDel: boolean;
+    targetLineNum: number | null;
+  }
+
+  let currentTargetLine = 1;
+  const parsedLines: ParsedLine[] = [];
+  const targetLineMap = new Map<number, string>();
+
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    const line = rawLines[idx];
+    if (line.startsWith('@@')) {
+      const match = /@@ -\d+(?:,\d+)? \+(\d+)/.exec(line);
+      if (match) {
+        currentTargetLine = parseInt(match[1], 10);
+      }
+      continue;
+    }
+
+    const isAdd = line.startsWith('+') && !line.startsWith('+++');
+    const isDel = line.startsWith('-') && !line.startsWith('---');
+    const cleanText = (isAdd || isDel || line.startsWith(' ')) ? line.slice(1) : line;
+
+    if (isDel) {
+      parsedLines.push({
+        rawIndex: idx,
+        rawText: line,
+        cleanText,
+        isAdd: false,
+        isDel: true,
+        targetLineNum: null,
+      });
+    } else {
+      const targetNum = currentTargetLine++;
+      targetLineMap.set(targetNum, cleanText);
+      parsedLines.push({
+        rawIndex: idx,
+        rawText: line,
+        cleanText,
+        isAdd,
+        isDel: false,
+        targetLineNum: targetNum,
+      });
+    }
+  }
+
   // Group findings by target line number to anchor inline comment cards directly beneath the offending code
   const findingsByLine = new Map<number, Finding[]>();
   const globalFindings: Finding[] = []; // File-level issues (e.g. missing test coverage or overall security notes)
 
   findings.forEach(f => {
-    if (f.line != null && f.line >= 1 && f.line <= rawLines.length) {
+    if (f.line != null) {
       const existing = findingsByLine.get(f.line) || [];
       existing.push(f);
       findingsByLine.set(f.line, existing);
@@ -302,7 +352,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
           </div>
 
           {/* Current Faulty Code Line */}
-          {finding.line != null && rawLines[finding.line - 1] && (
+          {(finding.evidence || (finding.line != null && targetLineMap.get(finding.line))) && (
             <div style={{ marginBottom: '12px' }}>
               <div style={{
                 fontSize: '11px',
@@ -325,7 +375,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                 overflowX: 'auto',
                 whiteSpace: 'pre',
               }}>
-                {rawLines[finding.line - 1]}
+                {finding.evidence || targetLineMap.get(finding.line!)}
               </div>
             </div>
           )}
@@ -473,20 +523,30 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
         lineHeight: '22px',
         background: '#050507',
       }}>
-        {rawLines.map((lineText, idx) => {
-          const lineNum = idx + 1;
-          const lineFindings = findingsByLine.get(lineNum);
+        {parsedLines.map((lineItem, idx) => {
+          const lineFindings = lineItem.targetLineNum != null
+            ? findingsByLine.get(lineItem.targetLineNum)
+            : undefined;
           const hasFinding = !!lineFindings && lineFindings.length > 0;
           const highestSeverity = lineFindings ? lineFindings[0].severity : null;
           const lineAccent = highestSeverity ? getSeverityBorder(highestSeverity) : null;
+          const isAdd = lineItem.isAdd;
+          const isDel = lineItem.isDel;
+          const lineBg = hasFinding
+            ? `${lineAccent}15`
+            : isAdd
+            ? 'rgba(74, 222, 128, 0.05)'
+            : isDel
+            ? 'rgba(244, 63, 94, 0.05)'
+            : undefined;
 
           return (
-            <React.Fragment key={`line-${lineNum}`}>
+            <React.Fragment key={`line-${idx}-${lineItem.targetLineNum ?? 'del'}`}>
               {/* Code Line */}
               <div style={{
                 display: 'flex',
                 alignItems: 'stretch',
-                background: hasFinding ? `${lineAccent}15` : 'transparent',
+                background: lineBg,
                 borderLeft: hasFinding ? `3px solid ${lineAccent}` : '3px solid transparent',
                 transition: 'background 0.12s ease',
               }}>
@@ -494,7 +554,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                 <div style={{
                   width: '46px',
                   padding: '0 12px 0 6px',
-                  color: hasFinding ? lineAccent! : '#484852',
+                  color: hasFinding ? lineAccent! : isDel ? '#f87171' : isAdd ? '#4ade80' : '#484852',
                   textAlign: 'right',
                   userSelect: 'none',
                   fontSize: '11px',
@@ -514,44 +574,28 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                       display: 'inline-block',
                     }} />
                   )}
-                  <span>{lineNum}</span>
+                  <span>{isDel ? '-' : (lineItem.targetLineNum ?? '')}</span>
                 </div>
 
                 {/* Line Code Content */}
-                {(() => {
-                  const isAdd = lineText.startsWith('+') && !lineText.startsWith('+++');
-                  const isDel = lineText.startsWith('-') && !lineText.startsWith('---');
-                  const lineBg = hasFinding
-                    ? undefined
-                    : isAdd
-                    ? 'rgba(74, 222, 128, 0.05)'
-                    : isDel
-                    ? 'rgba(244, 63, 94, 0.05)'
-                    : undefined;
-                  const cleanText = (isAdd || isDel || lineText.startsWith(' ')) ? lineText.slice(1) : lineText;
-
-                  return (
-                    <div style={{
-                      padding: '0 12px',
-                      whiteSpace: 'pre',
-                      flex: 1,
-                      color: isDel ? '#f87171' : '#d4d4d4',
-                      background: lineBg,
-                    }}>
-                      {isAdd && (
-                        <span style={{ color: '#4ade80', fontWeight: 700, marginRight: '4px' }}>+</span>
-                      )}
-                      {isDel && (
-                        <span style={{ color: '#f87171', fontWeight: 700, marginRight: '4px' }}>-</span>
-                      )}
-                      {highlightTokens(cleanText, isDel ? '#f87171' : isAdd ? '#9cdcfe' : '#d4d4d4') || '\u00A0'}
-                    </div>
-                  );
-                })()}
+                <div style={{
+                  padding: '0 12px',
+                  whiteSpace: 'pre',
+                  flex: 1,
+                  color: isDel ? '#f87171' : '#d4d4d4',
+                }}>
+                  {isAdd && (
+                    <span style={{ color: '#4ade80', fontWeight: 700, marginRight: '4px' }}>+</span>
+                  )}
+                  {isDel && (
+                    <span style={{ color: '#f87171', fontWeight: 700, marginRight: '4px' }}>-</span>
+                  )}
+                  {highlightTokens(lineItem.cleanText, isDel ? '#f87171' : isAdd ? '#9cdcfe' : '#d4d4d4') || '\u00A0'}
+                </div>
               </div>
 
               {/* Inline AI Review Card(s) attached directly underneath this line */}
-              {lineFindings && lineFindings.map((f, fIdx) => renderFindingCard(f, `line-${lineNum}-${fIdx}`))}
+              {lineFindings && lineFindings.map((f, fIdx) => renderFindingCard(f, `line-${lineItem.targetLineNum}-${fIdx}`))}
             </React.Fragment>
           );
         })}

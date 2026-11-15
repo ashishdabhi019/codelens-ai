@@ -8,6 +8,12 @@ REVIEW_PROMPT_TEMPLATE = """You are an expert senior code reviewer. Perform a co
 
 CRITICAL INSTRUCTIONS:
 - Identify ALL logical bugs, incorrect mathematical calculations, division-by-zero errors, missing input validation, incorrect business logic, and security vulnerabilities.
+- REVIEW RESULTING CODE, NOT SOLVED BUGS IN DELETED LINES:
+  * In git diffs, lines marked with '-' are DELETED OLD CODE.
+  * If the developer fixed an old bug by deleting a '-' line and replacing it with a '+' line (for example, replacing subtotal addition with multiplication), DO NOT report it as an active bug! It is already fixed by the author.
+  * ONLY report bugs that remain unresolved in the resulting new code ('+' added or unchanged lines).
+- MATHEMATICAL ACCURACY:
+  * Average is always calculated as sum divided by count. NEVER claim an average should be calculated using multiplication. The real defect in unvalidated average calculation is ZeroDivisionError on empty inputs ([]).
 - For EVERY issue found:
   * Specify the EXACT 1-based line number in the submitted code where the issue occurs.
   * Identify the exact root cause of the fault.

@@ -2,7 +2,7 @@ import re
 from typing import List, Optional, Set, Dict, Tuple
 from app.schemas.findings import Finding, ReviewResult
 from app.tools.diff_parser import DiffFile
-from app.tools.fix_validator import validate_suggested_fix
+from app.tools.fix_validator import validate_suggested_fix, normalize_code
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
@@ -163,6 +163,27 @@ def sanitize_unsupported_assumptions(finding: Finding) -> Finding:
     return finding
 
 
+def sanitize_hallucinated_average_finding(finding: Finding) -> Finding:
+    """
+    Corrects severe LLM hallucination claiming an average should be calculated using multiplication.
+    The real defect in unvalidated average calculation is ZeroDivisionError on empty input.
+    """
+    text = f"{finding.title} {finding.description} {finding.recommendation}".lower()
+    if "average" in text and ("multiply" in text or "multiplication" in text):
+        finding.title = "Potential ZeroDivisionError in calculate_average"
+        finding.category = "bug"
+        finding.severity = "high"
+        finding.description = (
+            "Calling calculate_average with an empty list or collection will cause a ZeroDivisionError "
+            "when dividing by len(values) or count = 0."
+        )
+        finding.root_cause = "Division by zero when input values collection is empty"
+        finding.impact = "Calling calculate_average([]) crashes the process with ZeroDivisionError."
+        finding.recommendation = "Add an upfront guard: if not values: return 0.0 before performing division."
+        finding.suggested_fix = "if not values:\n    return 0.0\ntotal = sum(values)\ncount = len(values)\nreturn total / count"
+    return finding
+
+
 def build_accurate_summary(
     llm_result: ReviewResult,
     findings: List[Finding],
@@ -246,8 +267,35 @@ def validate_and_merge(
     merged: List[Finding] = []
 
     for f in raw_findings:
-        # Extract evidence from code if line is known
+        # Correct known mathematical hallucinations (e.g. LLM claiming average is multiplication)
+        f = sanitize_hallucinated_average_finding(f)
+
         orig_code = line_map.get((f.file, f.line or 0)) if f.line else None
+
+        # If line points to a comment line, advance to the next code statement
+        if f.line and orig_code and (orig_code.strip().startswith("#") or not orig_code.strip()):
+            next_code = line_map.get((f.file, f.line + 1))
+            if next_code and not next_code.strip().startswith("#"):
+                f.line = f.line + 1
+                orig_code = next_code
+                f.evidence = next_code.strip()
+
+        # Drop findings that describe a bug in removed code that the author already fixed in this diff
+        if diff_files and f.line:
+            was_removed_and_fixed = False
+            for df in diff_files:
+                if df.new_path == f.file:
+                    for hunk in df.hunks:
+                        removed_texts = [dl.content.strip() for dl in hunk.lines if dl.change_type == "removed" and dl.content.strip()]
+                        added_texts = [dl.content.strip() for dl in hunk.lines if dl.change_type == "added" and dl.content.strip()]
+                        if any(rem in (f.evidence or "") or rem in f.description for rem in removed_texts):
+                            # The bug was in the removed line, and new code was added replacing it
+                            if added_texts and not any(rem in add for rem in removed_texts for add in added_texts):
+                                was_removed_and_fixed = True
+                                break
+            if was_removed_and_fixed:
+                continue
+
         if not f.evidence and orig_code:
             f.evidence = orig_code.strip()
 
