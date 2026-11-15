@@ -188,6 +188,7 @@ def build_accurate_summary(
     llm_result: ReviewResult,
     findings: List[Finding],
     has_tests: bool,
+    diff_files: Optional[List[DiffFile]] = None,
 ) -> Tuple[str, List[str], List[str]]:
     """
     Generates an accurate summary, missing_tests list, and positive_observations,
@@ -204,13 +205,18 @@ def build_accurate_summary(
     # 2. Build or refine missing_tests
     missing_tests = list(llm_result.missing_tests)
     if not has_tests:
-        standard_missing = [
-            f"No automated tests supplied for {f.file} (verify line {f.line or 'N/A'}: {f.title})"
-            for f in findings[:3]
-        ]
-        for sm in standard_missing:
-            if sm not in missing_tests:
-                missing_tests.append(sm)
+        if findings:
+            standard_missing = [
+                f"No automated tests supplied for {f.file} (verify line {f.line or 'N/A'}: {f.title})"
+                for f in findings[:3]
+            ]
+            for sm in standard_missing:
+                if sm not in missing_tests:
+                    missing_tests.append(sm)
+        elif diff_files:
+            for df in diff_files:
+                if df.new_path and df.new_path != "/dev/null":
+                    missing_tests.append(f"No unit tests supplied for {df.new_path} — logic lacks automated test coverage.")
 
     # 3. Create accurate summary
     crit_count = sum(1 for f in findings if f.severity == "critical")
@@ -339,7 +345,9 @@ def validate_and_merge(
     overall_status = "changes_requested" if merged else llm_result.overall_status
 
     # Build accurate summary without false test claims
-    summary, missing_tests, clean_positives = build_accurate_summary(llm_result, merged, has_tests)
+    summary, missing_tests, clean_positives = build_accurate_summary(
+        llm_result, merged, has_tests, diff_files=diff_files
+    )
 
     return llm_result.model_copy(
         update={
