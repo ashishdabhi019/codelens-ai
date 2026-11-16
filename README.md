@@ -5,7 +5,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-116%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Tests](https://img.shields.io/badge/pytest-160%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![Benchmark](https://img.shields.io/badge/benchmark-3--mode%20evaluation-blue?logo=speedtest&logoColor=white)](backend/benchmark.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -148,13 +148,13 @@ MODE 2: EVIDENCE VALIDATION & HALLUCINATION REJECTION BENCHMARK
   Fabricated ZeroDivision on Multiplication  -> REJECTED (No division/modulus operator)
   Accuracy                                   : 100.0% invalid findings filtered
 ==========================================================================================
-MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
+MODE 3: LOCAL LLM SERVICE AVAILABILITY CHECK & SEMANTIC PIPELINE STATUS
 ==========================================================================================
-  Target LLM Model: qwen2.5-coder:3b
-  Ollama Status   : OFFLINE / UNREACHABLE at http://localhost:11434
-  Execution Status: SKIPPED (No synthetic/hallucinated AI metrics claimed)
-  Fallback Mode   : DETERMINISTIC GUARANTEE (Pass 1 AST detectors + Pass 3 Evidence Validation)
-  Partial Review  : partial_analysis=True, overall_status != approved on issues
+  Target LLM Model    : qwen2.5-coder:3b
+  Ollama Service Check: OFFLINE / UNREACHABLE at http://localhost:11434
+  Semantic Review Eval: SKIPPED (No synthetic or simulated metrics claimed)
+  Deterministic Fallback: ACTIVE (Pass 1 AST detectors + Pass 3 Evidence Validation)
+  Partial Review Flag : partial_analysis=True, overall_status != approved on issues
 ==========================================================================================
 ```
 
@@ -164,24 +164,27 @@ MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
 
 ## 🧪 Comprehensive Automated Test Suite
 
-The test suite contains **116 automated unit and regression tests** across 12 test modules:
+The test suite contains **160 automated unit and regression tests** across 15 test modules:
 
 ```bash
 ./backend/.venv/bin/pytest backend/tests -v
 ```
 
 ### Key Test Modules:
-1. `test_29_payment_scenario.py` (7 tests): Section 7 critical regression scenario — detects hardcoded secret (`sk_live_...`), dynamic path traversal (`/var/receipts/...`), SSRF (`requests.post`), and duplicate refund race condition; rejects false ZeroDivision claims on multiplication (`total_spend * 0.125`); confirms atomic locks (`with self.lock:`) eliminate false race alarms; confirms unexecuted dynamic paths avoid false path traversal alarms.
-2. `test_sql_false_positives.py` (33 tests): Source-to-sink variable tracking, execution sink verification, alias tracking (`q2 = q1`), safe parameterized query preservation, and discount amount formula verification.
-3. `test_evidence_validation.py` (8 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, out-of-bounds lines, false ZeroDivision on multiplication, safe parameterized SQL, and `ast.literal_eval`.
-4. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).
-5. `test_diff_parser.py` & `test_diff_parser_extended.py` (10 tests): Multi-file and multi-hunk diff parsing, `\ No newline at end of file` marker safety, binary patch detection, and hunk line offset tracking.
-6. `test_pattern_detector.py` (8 tests): AST and static rules for SQL injection, hardcoded credentials, unsafe eval/exec, pickle deserialization, and calibrated confidence levels.
-7. `test_multilanguage.py` (5 tests): Multi-language detection for TypeScript, JavaScript, Go, Java, and C/C++.
-8. `test_calculator_22_lines.py` (1 test): Complete regression testing on multi-defect calculator scenarios.
-9. `test_review_validator.py` (15 tests): Semantic deduplication, severity ordering, risk escalation, and assumption sanitization.
-10. `test_llm_offline_handling.py` (2 tests): Graceful degradation when Ollama is offline, partial analysis flags, and non-approved status reporting.
-11. `test_api.py` & `test_api_security_extended.py` (11 tests): FastAPI endpoint validation, path traversal filename sanitization, streaming upload size limits, and safe error handling.
+1. `test_benchmark_integrity.py` (10 tests): Phase 2 benchmark dataset integrity verification — validates unique case IDs, fail-closed handling on missing defect metadata, rejection of duplicate and spurious findings as FPs, and multi-defect requirements for `CL-CASE-053`.
+2. `test_detector_12_categories.py` (26 tests): Phase 3 positive and negative regression tests covering all 12 vulnerability and bug categories (SQL injection, credentials, eval/exec, deserialization, zero division, crypto hashes, SSRF, path traversal, command injection, XSS, buffer overflow, and race conditions).
+3. `test_llm_integration.py` (6 tests): Phase 4 LLM review engine audit — JSON extraction, malformed JSON recovery, graceful degradation on connection timeouts, and live Ollama integration test.
+4. `test_evidence_validation.py` (10 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, ambiguous basenames, out-of-bounds lines, stolen evidence from unrelated functions, and false ZeroDivision claims.
+5. `test_29_payment_scenario.py` (7 tests): Section 7 critical regression scenario — detects hardcoded secret (`sk_live_...`), dynamic path traversal (`/var/receipts/...`), SSRF (`requests.post`), and duplicate refund race condition; rejects false ZeroDivision claims on multiplication (`total_spend * 0.125`); confirms atomic locks (`with self.lock:`) eliminate false race alarms; confirms unexecuted dynamic paths avoid false path traversal alarms.
+6. `test_sql_false_positives.py` (33 tests): Source-to-sink variable tracking, execution sink verification, alias tracking (`q2 = q1`), safe parameterized query preservation, and discount amount formula verification.
+7. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).
+8. `test_diff_parser.py` & `test_diff_parser_extended.py` (10 tests): Multi-file and multi-hunk diff parsing, `\ No newline at end of file` marker safety, binary patch detection, and hunk line offset tracking.
+9. `test_pattern_detector.py` (8 tests): AST and static rules for SQL injection, hardcoded credentials, unsafe eval/exec, pickle deserialization, and calibrated confidence levels.
+10. `test_multilanguage.py` (5 tests): Multi-language detection for TypeScript, JavaScript, Go, Java, and C/C++.
+11. `test_calculator_22_lines.py` (1 test): Complete regression testing on multi-defect calculator scenarios.
+12. `test_review_validator.py` (15 tests): Semantic deduplication, severity ordering, risk escalation, and assumption sanitization.
+13. `test_llm_offline_handling.py` (2 tests): Graceful degradation when Ollama is offline, partial analysis flags, and non-approved status reporting.
+14. `test_api.py` & `test_api_security_extended.py` (11 tests): FastAPI endpoint validation, path traversal filename sanitization, streaming upload size limits, and safe error handling.
 
 Frontend static analysis & production build:
 ```bash

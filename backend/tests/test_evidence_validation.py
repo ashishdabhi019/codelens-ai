@@ -234,3 +234,86 @@ diff --git a/auth.py b/auth.py
     assert len(result.findings) == 1
     assert result.findings[0].file == "auth.py"
     assert result.findings[0].line == 2
+
+
+def test_reject_ambiguous_basename_matches():
+    """When multiple files share the same basename, an unqualified finding file must be rejected as ambiguous."""
+    diff = """\
+diff --git a/pkg_a/handler.py b/pkg_a/handler.py
+--- /dev/null
++++ b/pkg_a/handler.py
+@@ -0,0 +1,3 @@
++def handle():
++    pass
+diff --git a/pkg_b/handler.py b/pkg_b/handler.py
+--- /dev/null
++++ b/pkg_b/handler.py
+@@ -0,0 +1,3 @@
++def handle():
++    pass
++"""
+    diff_files = parse_git_diff(diff)
+    f = Finding(
+        title="Issue in handler",
+        category="bug",
+        severity="medium",
+        file="handler.py",  # Ambiguous! Both pkg_a/handler.py and pkg_b/handler.py exist
+        line=1,
+        evidence="def handle():",
+        description="Ambiguous file test",
+        impact="None",
+        recommendation="Fix",
+    )
+    result = validate_and_merge(_make_review_result([f]), [], diff_files=diff_files)
+    assert len(result.findings) == 0
+    assert result.unverified_findings_count == 1
+
+
+def test_reject_evidence_copied_from_unrelated_function():
+    """Evidence copied across unrelated functions (>3 lines away) must be rejected."""
+    diff = """\
+diff --git a/service.py b/service.py
+--- /dev/null
++++ b/service.py
+@@ -0,0 +1,15 @@
++def func_one():
++    sensitive_token_variable = "abc123secretvalue"
++    return True
++
++def func_two():
++    pass
++
++def func_three():
++    return False
++"""
+    diff_files = parse_git_diff(diff)
+    # First finding on line 2 with sensitive token
+    f1 = Finding(
+        title="Hardcoded credential in func_one",
+        category="security",
+        severity="high",
+        file="service.py",
+        line=2,
+        evidence='sensitive_token_variable = "abc123secretvalue"',
+        description="First finding",
+        impact="Leak",
+        recommendation="Env var",
+    )
+    # Second finding claims line 11 (func_three) but copies the exact evidence from line 2!
+    f2 = Finding(
+        title="Stolen evidence in func_three",
+        category="security",
+        severity="high",
+        file="service.py",
+        line=11,
+        evidence='sensitive_token_variable = "abc123secretvalue"',  # Copied from line 2!
+        description="Second finding with stolen evidence",
+        impact="Leak",
+        recommendation="Env var",
+    )
+    result = validate_and_merge(_make_review_result([f1, f2]), [], diff_files=diff_files)
+    # f1 should be accepted, but f2 must be rejected!
+    assert len(result.findings) == 1
+    assert result.findings[0].line == 2
+    assert result.unverified_findings_count == 1
+
