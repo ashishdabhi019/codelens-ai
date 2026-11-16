@@ -24,6 +24,15 @@ from app.schemas.findings import Finding, ReviewResult
 
 
 @dataclass
+class ExpectedDefect:
+    vulnerability_type: str      # e.g. "sql", "credential", "path traversal", "ssrf", "race condition"
+    file: str                    # exact expected file name (e.g. "payment_processor.py")
+    lines: List[int]             # exact line numbers in diff (e.g. [7] or [14, 15])
+    evidence_substr: str         # required substring in f.evidence (e.g. "sk_live_")
+    category: str = "security"   # "security" or "bug"
+
+
+@dataclass
 class BenchmarkCase:
     name: str
     category: str
@@ -31,6 +40,7 @@ class BenchmarkCase:
     is_vulnerable: bool
     expected_vulnerability: Optional[str] = None
     expected_vulnerabilities: Optional[List[str]] = None
+    expected_defects: Optional[List[ExpectedDefect]] = None
     description: str = ""
     case_id: str = ""
     expected_file: Optional[str] = None
@@ -1016,54 +1026,77 @@ def format_metric(val: Optional[float]) -> str:
     return f"{val * 100:.1f}%" if val is not None else "N/A"
 
 
-def verify_finding_strict(f: Finding, case: BenchmarkCase, diff_files: List) -> tuple[bool, bool, str]:
+DEFAULT_CASE_DEFECTS: Dict[str, List[ExpectedDefect]] = {
+    "CL-CASE-001": [ExpectedDefect("sql", "db.py", [2], "cursor.execute", "security")],
+    "CL-CASE-002": [ExpectedDefect("sql", "db.py", [3], "cursor.execute(query)", "security")],
+    "CL-CASE-003": [ExpectedDefect("sql", "db.py", [2], "cursor.execute", "security")],
+    "CL-CASE-004": [ExpectedDefect("sql", "db.py", [2], "cursor.execute", "security")],
+    "CL-CASE-008": [ExpectedDefect("sql", "db.ts", [2], "db.query", "security")],
+    "CL-CASE-009": [ExpectedDefect("sql", "Repo.java", [2], "executeQuery", "security")],
+    "CL-CASE-010": [ExpectedDefect("sql", "repo.go", [2], "QueryRow", "security")],
+    "CL-CASE-011": [ExpectedDefect("credential", "config.py", [1], "API_SECRET", "security")],
+    "CL-CASE-012": [ExpectedDefect("credential", "auth.py", [2], "api_key", "security")],
+    "CL-CASE-016": [ExpectedDefect("eval", "calc.py", [2], "eval(expr)", "security")],
+    "CL-CASE-017": [ExpectedDefect("exec", "runner.py", [2], "exec(plugin_code)", "security")],
+    "CL-CASE-019": [ExpectedDefect("pickle", "cache.py", [3], "pickle.loads", "security")],
+    "CL-CASE-020": [ExpectedDefect("pickle", "cache.py", [3], "pickle.load", "security")],
+    "CL-CASE-022": [ExpectedDefect("zerodivision", "stats.py", [3], "len(values)", "bug")],
+    "CL-CASE-028": [ExpectedDefect("discount", "pricing.py", [2], "price * (discount / 100)", "bug")],
+    "CL-CASE-029": [ExpectedDefect("discount", "discount.py", [2], "price / (1 - discount_percent / 100)", "bug")],
+    "CL-CASE-030": [ExpectedDefect("transfer_money", "bank.py", [6], '"status": "success"', "bug")],
+    "CL-CASE-032": [ExpectedDefect("password", "auth.py", [3], "hashlib.md5", "security")],
+    "CL-CASE-033": [ExpectedDefect("password", "auth.py", [3], "hashlib.sha1", "security")],
+    "CL-CASE-035": [ExpectedDefect("ssrf", "notify.py", [3], "requests.post(webhook_url", "security")],
+    "CL-CASE-036": [ExpectedDefect("ssrf", "avatar.py", [3], "requests.get(image_url", "security")],
+    "CL-CASE-038": [ExpectedDefect("traversal", "files.py", [2], 'open(f"/var/receipts', "security")],
+    "CL-CASE-039": [ExpectedDefect("traversal", "upload.py", [2, 3], "uploads", "security")],
+    "CL-CASE-042": [ExpectedDefect("os.system", "backup.py", [3], "os.system", "security")],
+    "CL-CASE-043": [ExpectedDefect("shell=true", "backup.py", [3], "shell=True", "security")],
+    "CL-CASE-045": [ExpectedDefect("xss", "render.ts", [2], "element.innerHTML", "security")],
+    "CL-CASE-047": [ExpectedDefect("buffer", "parser.c", [2], "strcpy", "security")],
+    "CL-CASE-053": [
+        ExpectedDefect("credential", "payment_processor.py", [7], "sk_live_998877665544332211", "security"),
+        ExpectedDefect("path traversal", "payment_processor.py", [14, 15], "receipt_path", "security"),
+        ExpectedDefect("ssrf", "payment_processor.py", [18], "requests.post(webhook_url", "security"),
+        ExpectedDefect("race condition", "payment_processor.py", [18, 20], "processed_transactions", "bug"),
+    ],
+}
+
+
+def match_finding_to_defect(f: Finding, defect: ExpectedDefect) -> bool:
     """
-    Multi-factor verification of finding integrity:
-    1. File path verification (must match a file in diff_files, and case.expected_file if specified)
-    2. Line number verification (must be an added line in diff_files, and case.expected_lines if specified)
-    3. Evidence verification (must be non-empty string and present in diff)
-    4. Vulnerability category and semantic match against expected vulnerability
-    Returns (is_structurally_valid, matches_expected, detail)
+    Strict 5-factor verification of finding against expected defect:
+    1. Exact file match (basename or full relative path)
+    2. Exact line number match within target range
+    3. Exact code evidence substring present
+    4. Exact category match ('security' vs 'bug')
+    5. Semantic vulnerability type keyword match in title or root cause
     """
-    valid_files = [df.new_path or df.old_path for df in diff_files]
-    file_ok = f.file in valid_files or any(vf.endswith(f.file) or f.file.endswith(vf) for vf in valid_files)
-    if case.expected_file:
-        file_ok = file_ok and (f.file.endswith(case.expected_file) or case.expected_file.endswith(f.file))
-    if not file_ok:
-        return False, False, f"Invalid file path: {f.file}"
+    f_file = (f.file or "").replace("\\", "/").split("/")[-1]
+    d_file = defect.file.replace("\\", "/").split("/")[-1]
+    if f_file != d_file:
+        return False
 
-    added_lines = {
-        l.line_number
-        for df in diff_files
-        for h in df.hunks
-        for l in h.lines
-        if l.change_type == "added" and l.line_number is not None
-    }
-    line_ok = f.line in added_lines
-    if case.expected_lines:
-        line_ok = line_ok and (f.line in case.expected_lines)
-    if not line_ok:
-        return False, False, f"Invalid line {f.line} (not in added diff lines)"
+    if f.line not in defect.lines:
+        return False
 
-    if not f.evidence or not f.evidence.strip():
-        return False, False, "Evidence is empty or missing"
+    if defect.evidence_substr.lower() not in (f.evidence or "").lower():
+        return False
 
-    if not case.is_vulnerable:
-        return True, False, "Unexpected finding on safe code"
+    if (f.category or "").lower() != defect.category.lower():
+        return False
 
-    expected_list = case.expected_vulnerabilities or ([case.expected_vulnerability] if case.expected_vulnerability else [])
-    haystack = f"{f.title} {f.root_cause or ''} {f.description} {f.category}".lower()
-    for exp in expected_list:
-        if exp.lower() in haystack:
-            return True, True, exp.lower()
+    vuln_haystack = f"{f.title} {f.root_cause or ''}".lower()
+    if defect.vulnerability_type.lower() not in vuln_haystack:
+        return False
 
-    return True, False, "Unrelated finding"
+    return True
 
 
 def evaluate_mode1_deterministic_engine(dataset: List[BenchmarkCase]) -> Dict:
     """
     Mode 1: Evaluates the deterministic AST & static-analysis engine.
-    Measures precision, recall, specificity, F1, and latency with strict multi-factor verification.
+    Measures separate Case-Level and Defect-Level precision, recall, specificity, and F1.
     """
     print("\n" + "=" * 90)
     print("MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK")
@@ -1073,7 +1106,9 @@ def evaluate_mode1_deterministic_engine(dataset: List[BenchmarkCase]) -> Dict:
 
     category_stats: Dict[str, Dict[str, int]] = {}
     durations = []
-    tp = fp = tn = fn = 0
+
+    case_tp = case_fp = case_tn = case_fn = 0
+    defect_tp = defect_fp = defect_fn = 0
 
     for i, case in enumerate(dataset):
         case_id = case.case_id or f"CL-CASE-{i+1:03d}"
@@ -1098,86 +1133,107 @@ def evaluate_mode1_deterministic_engine(dataset: List[BenchmarkCase]) -> Dict:
         if cat not in category_stats:
             category_stats[cat] = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
-        case_tp = 0
-        case_fp = 0
-        case_tn = 0
-        case_fn = 0
-
-        expected_list = case.expected_vulnerabilities or ([case.expected_vulnerability] if case.expected_vulnerability else [])
-        matched_expected_vulns = set()
-
         if case.is_vulnerable:
-            for f in findings:
-                is_valid, matches, detail = verify_finding_strict(f, case, diff_files)
-                if not is_valid:
-                    case_fp += 1
-                elif matches:
-                    if detail not in matched_expected_vulns:
-                        matched_expected_vulns.add(detail)
-                        case_tp += 1
-                    else:
-                        case_fp += 1
-                else:
-                    case_fp += 1
+            exp_defects = case.expected_defects or DEFAULT_CASE_DEFECTS.get(case_id, [])
+            matched_indices = set()
+            spurious_count = 0
+            duplicate_count = 0
 
-            for exp in expected_list:
-                if exp.lower() not in matched_expected_vulns:
-                    case_fn += 1
+            for f in findings:
+                matched = False
+                for didx, defect in enumerate(exp_defects):
+                    if match_finding_to_defect(f, defect):
+                        if didx not in matched_indices:
+                            matched_indices.add(didx)
+                            defect_tp += 1
+                            matched = True
+                            break
+                        else:
+                            duplicate_count += 1
+                            defect_fp += 1
+                            matched = True
+                            break
+                if not matched:
+                    spurious_count += 1
+                    defect_fp += 1
+
+            missed_count = len(exp_defects) - len(matched_indices)
+            defect_fn += missed_count
+
+            if missed_count == 0 and spurious_count == 0 and duplicate_count == 0:
+                case_status = "TP (HIT)"
+                case_tp += 1
+                category_stats[cat]["tp"] += 1
+            elif missed_count == 0 and (spurious_count > 0 or duplicate_count > 0):
+                case_status = "TP+FP (MIX)"
+                case_fp += 1
+                category_stats[cat]["fp"] += 1
+            elif missed_count > 0 and len(matched_indices) > 0:
+                case_status = f"PARTIAL ({len(matched_indices)}/{len(exp_defects)})"
+                case_fn += 1
+                category_stats[cat]["fn"] += 1
+            else:
+                case_status = "FN (MISSED)"
+                case_fn += 1
+                category_stats[cat]["fn"] += 1
         else:
             if len(findings) == 0:
+                case_status = "TN (CLEAN)"
                 case_tn += 1
+                category_stats[cat]["tn"] += 1
             else:
-                case_fp += len(findings)
-
-        tp += case_tp
-        fp += case_fp
-        tn += case_tn
-        fn += case_fn
-
-        category_stats[cat]["tp"] += case_tp
-        category_stats[cat]["fp"] += case_fp
-        category_stats[cat]["tn"] += case_tn
-        category_stats[cat]["fn"] += case_fn
-
-        if case.is_vulnerable:
-            if case_tp > 0 and case_fp == 0 and case_fn == 0:
-                status = "TP (HIT)"
-            elif case_tp > 0 and case_fp > 0:
-                status = "TP+FP (MIX)"
-            elif case_fn > 0:
-                status = "FN (MISSED)"
-            else:
-                status = "FP (NO MATCH)"
-        else:
-            if case_fp == 0:
-                status = "TN (CLEAN)"
-            else:
-                status = "FP (ALARM)"
+                case_status = "FP (ALARM)"
+                case_fp += 1
+                defect_fp += len(findings)
+                category_stats[cat]["fp"] += 1
 
         label = f"[{case_id}] {case.name[:30]}"
-        print(f"[{status:^13}] | {cat:<18} | {label:<38} | {elapsed*1000:>6.1f}ms")
+        print(f"[{case_status:^13}] | {cat:<18} | {label:<38} | {elapsed*1000:>6.1f}ms")
 
-    total = len(dataset)
-    precision = (tp / (tp + fp)) if (tp + fp) > 0 else None
-    recall = (tp / (tp + fn)) if (tp + fn) > 0 else None
-    f1 = (2 * precision * recall / (precision + recall)) if (precision and recall and (precision + recall) > 0) else None
-    specificity = (tn / (tn + fp)) if (tn + fp) > 0 else None
-    fpr = (fp / (fp + tn)) if (fp + tn) > 0 else None
+    total_cases = len(dataset)
+    case_prec = (case_tp / (case_tp + case_fp)) if (case_tp + case_fp) > 0 else None
+    case_rec = (case_tp / (case_tp + case_fn)) if (case_tp + case_fn) > 0 else None
+    case_f1 = (2 * case_prec * case_rec / (case_prec + case_rec)) if (case_prec and case_rec and (case_prec + case_rec) > 0) else None
+    case_spec = (case_tn / (case_tn + case_fp)) if (case_tn + case_fp) > 0 else None
+
+    defect_prec = (defect_tp / (defect_tp + defect_fp)) if (defect_tp + defect_fp) > 0 else None
+    defect_rec = (defect_tp / (defect_tp + defect_fn)) if (defect_tp + defect_fn) > 0 else None
+    defect_f1 = (2 * defect_prec * defect_rec / (defect_prec + defect_rec)) if (defect_prec and defect_rec and (defect_prec + defect_rec) > 0) else None
+
     avg_latency_ms = (sum(durations) / len(durations) * 1000) if durations else 0.0
 
     print("-" * 90)
     print("MODE 1 METRICS SUMMARY:")
-    print(f"  Total Labeled Cases : {total}")
-    print(f"  True Positives (TP) : {tp}")
-    print(f"  True Negatives (TN) : {tn}")
-    print(f"  False Positives (FP): {fp}")
-    print(f"  False Negatives (FN): {fn}")
-    print(f"  Precision           : {format_metric(precision)}")
-    print(f"  Recall              : {format_metric(recall)}")
-    print(f"  F1 Score            : {format_metric(f1)}")
-    print(f"  Specificity         : {format_metric(specificity)}")
-    print(f"  False Positive Rate : {format_metric(fpr)}")
-    print(f"  Avg Case Latency    : {avg_latency_ms:.2f} ms")
+    print("  1. CASE-LEVEL METRICS (Whole-file review pass/fail confusion matrix):")
+    print(f"     Total Labeled Cases : {total_cases} (28 Vulnerable, 28 Safe)")
+    print(f"     True Positives (TP) : {case_tp} (all required defects found, 0 false alarms)")
+    print(f"     True Negatives (TN) : {case_tn} (clean safe code, 0 false alarms)")
+    print(f"     False Positives (FP): {case_fp} (false alarms on safe code or unverified extras)")
+    print(f"     False Negatives (FN): {case_fn} (vulnerable code with missed defects)")
+    print(f"     Case Precision      : {format_metric(case_prec)}")
+    print(f"     Case Recall         : {format_metric(case_rec)}")
+    print(f"     Case F1 Score       : {format_metric(case_f1)}")
+    print(f"     Case Specificity    : {format_metric(case_spec)}")
+    print()
+    print("  2. DEFECT-LEVEL METRICS (Individual vulnerability detection with exact location & evidence):")
+    print(f"     Total Target Defects: {defect_tp + defect_fn} (27 single-defect + 4 payment scenario)")
+    print(f"     True Positives (TP) : {defect_tp} (verified file, line range, evidence, and type)")
+    print(f"     False Positives (FP): {defect_fp} (hallucinated, duplicate, or mislocated findings)")
+    print(f"     False Negatives (FN): {defect_fn} (unidentified genuine vulnerabilities)")
+    print(f"     Defect Precision    : {format_metric(defect_prec)}")
+    print(f"     Defect Recall       : {format_metric(defect_rec)}")
+    print(f"     Defect F1 Score     : {format_metric(defect_f1)}")
+    print(f"  Avg Case Latency       : {avg_latency_ms:.2f} ms")
+    print("=" * 90)
+
+    return {
+        "case_tp": case_tp, "case_fp": case_fp, "case_tn": case_tn, "case_fn": case_fn,
+        "case_precision": case_prec, "case_recall": case_rec, "case_f1": case_f1, "case_specificity": case_spec,
+        "defect_tp": defect_tp, "defect_fp": defect_fp, "defect_fn": defect_fn,
+        "defect_precision": defect_prec, "defect_recall": defect_rec, "defect_f1": defect_f1,
+        "avg_latency_ms": avg_latency_ms,
+        "category_stats": category_stats,
+    }
     print("=" * 90)
 
     return {
@@ -1363,19 +1419,23 @@ def evaluate_benchmark():
         "mode2": m2,
         "mode3": m3,
         "total": len(BENCHMARK_DATASET),
-        "precision": m1["precision"],
-        "recall": m1["recall"],
-        "f1": m1["f1"],
-        "fp": m1["fp"],
+        "case_precision": m1["case_precision"],
+        "case_recall": m1["case_recall"],
+        "case_f1": m1["case_f1"],
+        "case_fp": m1["case_fp"],
+        "defect_precision": m1["defect_precision"],
+        "defect_recall": m1["defect_recall"],
+        "defect_f1": m1["defect_f1"],
+        "defect_fp": m1["defect_fp"],
     }
 
 
 if __name__ == "__main__":
     metrics = evaluate_benchmark()
-    if metrics["fp"] > 0:
+    if metrics["case_fp"] > 0 or metrics["defect_fp"] > 0:
         print("\n[WARN] Benchmark detected false positives.")
         sys.exit(1)
-    if metrics["f1"] is not None and metrics["f1"] < 0.90:
-        print("\n[WARN] F1 score below 90% threshold.")
+    if metrics["case_f1"] is not None and metrics["case_f1"] < 0.90:
+        print("\n[WARN] Case F1 score below 90% threshold.")
         sys.exit(1)
-    print(f"\nBenchmark completed successfully ({metrics['total']} cases, {format_metric(metrics['precision'])} precision, {format_metric(metrics['recall'])} recall, {format_metric(metrics['f1'])} F1).")
+    print(f"\nBenchmark completed successfully ({metrics['total']} cases evaluated: Case F1={format_metric(metrics['case_f1'])}, Defect F1={format_metric(metrics['defect_f1'])}).")

@@ -119,16 +119,26 @@ CodeLens AI includes a standalone, reproducible benchmark suite (`backend/benchm
 ==========================================================================================
 MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK
 ==========================================================================================
-  Total Labeled Cases : 56 (28 Vulnerable, 28 Safe & Held-Out)
-  True Positives (TP) : 31
-  True Negatives (TN) : 28
-  False Positives (FP): 0
-  False Negatives (FN): 0
-  Precision           : 100.0%
-  Recall              : 100.0%
-  F1 Score            : 100.0%
-  Specificity         : 100.0%
-  Avg Case Latency    : 0.65 ms
+  1. CASE-LEVEL METRICS (Whole-file review pass/fail confusion matrix):
+     Total Labeled Cases : 56 (28 Vulnerable, 28 Safe)
+     True Positives (TP) : 28 (all required defects found, 0 false alarms)
+     True Negatives (TN) : 28 (clean safe code, 0 false alarms)
+     False Positives (FP): 0  (false alarms on safe code or unverified extras)
+     False Negatives (FN): 0  (vulnerable code with missed defects)
+     Case Precision      : 100.0%
+     Case Recall         : 100.0%
+     Case F1 Score       : 100.0%
+     Case Specificity    : 100.0%
+
+  2. DEFECT-LEVEL METRICS (Individual vulnerability detection with exact location & evidence):
+     Total Target Defects: 31 (27 single-defect + 4 payment scenario)
+     True Positives (TP) : 31 (verified file, line range, evidence, and type)
+     False Positives (FP): 0  (hallucinated, duplicate, or mislocated findings)
+     False Negatives (FN): 0  (unidentified genuine vulnerabilities)
+     Defect Precision    : 100.0%
+     Defect Recall       : 100.0%
+     Defect F1 Score     : 100.0%
+  Avg Case Latency       : 0.21 ms
 ==========================================================================================
 MODE 2: EVIDENCE VALIDATION & HALLUCINATION REJECTION BENCHMARK
 ==========================================================================================
@@ -147,6 +157,8 @@ MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
   Partial Review  : partial_analysis=True, overall_status != approved on issues
 ==========================================================================================
 ```
+
+> **Evaluation Methodology Note:** The benchmark evaluates 56 curated test cases and synthetic traps to measure regression stability, AST pattern correctness, and evidence validation under controlled conditions. It does not claim 100% real-world accuracy across unconstrained, dynamic third-party codebases.
 
 ---
 
