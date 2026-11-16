@@ -362,7 +362,7 @@ export function ReviewResults() {
         )}
       </div>
 
-      {/* Primary Content: Inline Code Window with AI Review Comments (Image 2 style) */}
+      {/* Primary Content: Inline Code Window with Review Comments */}
       {viewMode === 'inline' && review.diff_content ? (
         <InlineCodeReview
           diffContent={review.diff_content}

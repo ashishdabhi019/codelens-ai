@@ -474,7 +474,7 @@ export function NewReview() {
     try {
       const activeScen = SAMPLE_SCENARIOS.find(s => s.key === activeSample);
       const filename = uploadedFile?.name || activeScen?.filename || (language ? `file.${language.toLowerCase()}` : 'code.py');
-      // If the content in editor is pure code (not already a unified diff), wrap it behind the scenes for the AI reviewer
+      // Wrap pure source code into unified diff format if not already a diff
       const payloadContent = convertSourceToDiff(filename, diffContent);
 
       const response = await submitReview({
@@ -583,7 +583,7 @@ export function NewReview() {
         </div>
       )}
 
-      {/* REIMAGINED: Pre-test Sample Scenarios Bar */}
+      {/* Sample Scenarios Bar */}
       <div style={{ marginBottom: '22px' }}>
         <div style={{
           display: 'flex',
@@ -761,7 +761,7 @@ export function NewReview() {
         </div>
       </div>
 
-      {/* Code Studio & AI Prompt Bar */}
+      {/* Code Editor and Prompt Controls */}
       <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '14px' }}>
         
         {/* Code Editor Window */}
@@ -1074,7 +1074,7 @@ export function NewReview() {
           </div>
         </div>
 
-        {/* AI Prompt Bar below the Code Window */}
+        {/* Prompt Input and Options Bar */}
         {(() => {
           const isPromptActive = promptFocused || focusMenuOpen || langMenuOpen;
           return (

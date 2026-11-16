@@ -68,7 +68,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={contextValue}>
       {children}
 
-      {/* BOTTOM-RIGHT Modern Glassmorphic Pill Stack */}
+      {/* Toast notification container */}
       <div
         style={{
           position: 'fixed',

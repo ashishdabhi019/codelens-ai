@@ -1,5 +1,5 @@
 """
-Tests for Phase 2: Benchmark Dataset Integrity, Expected-Defect Verification, and Metrics.
+Tests for benchmark dataset integrity, expected defect verification, and confusion matrix metrics.
 
 Validates:
 1. Vulnerable cases with missing or empty expected_defects fail closed.

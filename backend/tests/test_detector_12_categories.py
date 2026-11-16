@@ -1,5 +1,5 @@
 """
-Phase 3: Positive and Negative Regression Tests for All 12 Vulnerability and Bug Categories.
+Positive and negative regression tests for all 12 vulnerability and bug categories.
 
 Categories tested:
 1. SQL Injection (AST source-to-sink)

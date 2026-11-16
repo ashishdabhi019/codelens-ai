@@ -5,7 +5,7 @@ from app.schemas.findings import ReviewResult
 
 
 def test_calculator_22_lines_demo_scenario():
-    """Verifies all 4 demo findings line numbers and fix behaviors for calculator.py."""
+    """Verifies finding line numbers and fix behaviors for calculator.py regression case."""
     with open("sample_diffs/python_logic_bug.diff") as f:
         diff_text = f.read()
 

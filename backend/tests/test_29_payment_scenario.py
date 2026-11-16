@@ -1,5 +1,5 @@
 """
-Regression tests for Section 7: 29-Line Payment/Refund Code Review Scenario.
+Regression tests for 29-line payment and refund code review scenario.
 
 Verifies:
 1. Rejection of false ZeroDivisionError on multiplication: return total_spend * 0.125

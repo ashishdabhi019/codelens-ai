@@ -1,5 +1,5 @@
 """
-Phase 4: LLM Review Engine Audit, Error Handling, and Live Integration Tests.
+Tests for LLM review parsing, JSON error recovery, offline degradation, and live integration.
 
 Validates:
 1. extract_json handles direct JSON, markdown code fences, and raw text.

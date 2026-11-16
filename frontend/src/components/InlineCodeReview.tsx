@@ -124,8 +124,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
   // Determine if content is git diff format
   const isDiff = diffContent.includes('--- ') && diffContent.includes('+++ ') && diffContent.includes('@@');
 
-  // Strip git diff headers so the user sees clean code starting directly at Line 1.
-  // This matches GitHub PR / Devin AI behavior where raw diff headers aren't treated as code lines.
+  // Strips diff metadata headers so display lines align with source file numbers
   let displayCode = diffContent;
   if (isDiff) {
     const lines = diffContent.split('\n');
@@ -627,7 +626,7 @@ export function InlineCodeReview({ diffContent, filename, findings }: InlineCode
                 </div>
               </div>
 
-              {/* Inline AI Review Card(s) attached directly underneath this line */}
+              {/* Inline review finding cards anchored beneath this line */}
               {lineFindings && lineFindings.map((f, fIdx) => renderFindingCard(f, `line-${lineItem.targetLineNum}-${fIdx}`))}
             </React.Fragment>
           );

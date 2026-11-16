@@ -25,8 +25,8 @@ async def run_review(request: ReviewRequest) -> ReviewResult:
     # Step 2: Extract changed sections with surrounding context for prompt feeding
     code_sections = inspect_changed_code(diff_files)
 
-    # Step 3: Run deterministic security rules (SQLi, eval, hardcoded secrets)
-    # These always run first and carry 100% confidence, even if the LLM is completely offline
+    # Step 3: Run deterministic static analysis rules (SQLi, eval, hardcoded secrets)
+    # Evaluates code changes independently of LLM service availability
     deterministic_findings = detect_risky_patterns(request.diff_content, diff_files)
 
     # Step 4: Dispatch semantic analysis to Ollama (or fallback gracefully if unreachable)
