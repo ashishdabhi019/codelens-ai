@@ -144,6 +144,153 @@ diff --git a/math_ops.py b/math_ops.py
     assert not any("SQL" in f.title for f in findings)
 
 
+def test_dynamic_sql_assigned_never_executed_not_flagged():
+    """Dynamic SQL query assigned to variable but never executed in a sink must not be flagged."""
+    diff = """\
+diff --git a/report.py b/report.py
+--- /dev/null
++++ b/report.py
+@@ -0,0 +1,4 @@
++def prepare_report(user_input):
++    query = "SELECT * FROM users WHERE name = '" + user_input + "'"
++    return "Report prepared"
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert not any("SQL" in f.title for f in findings)
+
+
+def test_dynamic_sql_reassigned_to_safe_query_not_flagged():
+    """Dynamic SQL variable reassigned to a safe query before execution must not be flagged."""
+    diff = """\
+diff --git a/repo.py b/repo.py
+--- /dev/null
++++ b/repo.py
+@@ -0,0 +1,6 @@
++def get_user(cursor, user_id):
++    query = f"SELECT * FROM users WHERE id = {user_id}"
++    query = "SELECT * FROM users WHERE id = ?"
++    cursor.execute(query, (user_id,))
++    return cursor.fetchone()
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert not any("SQL" in f.title for f in findings)
+
+
+def test_safe_query_reassigned_to_dynamic_query_flagged():
+    """Safe query variable reassigned to dynamic SQL before execution must be detected."""
+    diff = """\
+diff --git a/repo.py b/repo.py
+--- /dev/null
++++ b/repo.py
+@@ -0,0 +1,6 @@
++def get_user(cursor, user_id):
++    query = "SELECT * FROM users WHERE id = ?"
++    query = f"SELECT * FROM users WHERE id = {user_id}"
++    cursor.execute(query)
++    return cursor.fetchone()
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert any("SQL" in f.title for f in findings)
+
+
+def test_two_functions_independent_sql_scopes():
+    """Two independent functions using the same variable name must not pollute each other's scopes."""
+    diff = """\
+diff --git a/repo.py b/repo.py
+--- /dev/null
++++ b/repo.py
+@@ -0,0 +1,9 @@
++def prepare_report(user_input):
++    query = f"SELECT * FROM users WHERE name = {user_input}"
++    return "Report"
++
++def safe_lookup(cursor, user_id):
++    query = "SELECT * FROM users WHERE id = ?"
++    cursor.execute(query, (user_id,))
++    return cursor.fetchone()
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    # Neither should be flagged: prepare_report has no execution sink, safe_lookup is parameterized
+    assert not any("SQL" in f.title for f in findings)
+
+
+def test_sql_variable_alias_executed_flagged():
+    """Tracking aliases (q2 = q1) must flag when alias reaches database execution sink."""
+    diff = """\
+diff --git a/repo.py b/repo.py
+--- /dev/null
++++ b/repo.py
+@@ -0,0 +1,6 @@
++def find_user(cursor, user_id):
++    q1 = f"SELECT * FROM users WHERE id = {user_id}"
++    q2 = q1
++    cursor.execute(q2)
++    return cursor.fetchone()
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert any("SQL" in f.title for f in findings)
+
+
+def test_discount_amount_not_flagged_as_broken():
+    """discount_amount = price * (discount / 100) calculates the discount amount and must not be flagged."""
+    diff = """\
+diff --git a/pricing.py b/pricing.py
+--- /dev/null
++++ b/pricing.py
+@@ -0,0 +1,4 @@
++def calculate_discount_amount(price, discount):
++    discount_amount = price * (discount / 100)
++    return discount_amount
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert not any("discount" in f.title.lower() for f in findings)
+
+
+def test_final_price_incorrect_formula_flagged():
+    """final_price = price * (discount / 100) claiming to be final payable price must be detected."""
+    diff = """\
+diff --git a/pricing.py b/pricing.py
+--- /dev/null
++++ b/pricing.py
+@@ -0,0 +1,4 @@
++def calculate_broken_price(price, discount):
++    final_price = price * (discount / 100)
++    return final_price
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert any("discount" in f.title.lower() for f in findings)
+
+
+def test_valid_bank_transfer_not_flagged():
+    """Bank transfer that checks receiver, checks balance, and updates atomically must not be flagged."""
+    diff = """\
+diff --git a/bank.py b/bank.py
+--- /dev/null
++++ b/bank.py
+@@ -0,0 +1,11 @@
++def transfer_money(cursor, sender_id, receiver_id, amount):
++    receiver = cursor.execute("SELECT id FROM accounts WHERE id = ?", (receiver_id,)).fetchone()
++    if not receiver:
++        return {"error": "Receiver not found"}
++    sender = cursor.execute("SELECT balance FROM accounts WHERE id = ?", (sender_id,)).fetchone()
++    if not sender or sender[0] < amount:
++        return {"error": "Insufficient funds"}
++    cursor.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (amount, sender_id))
++    cursor.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (amount, receiver_id))
++    return {"status": "success"}
++"""
+    files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, files)
+    assert not any("transfer" in f.title.lower() for f in findings)
+
+
 # ============================================================================
 # 2. EVIDENCE VALIDATION & THEFT REJECTION
 # ============================================================================

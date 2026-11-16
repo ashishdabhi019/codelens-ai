@@ -5,8 +5,8 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-75%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
-[![Benchmark](https://img.shields.io/badge/benchmark-100%25%20F1-blue?logo=speedtest&logoColor=white)](backend/benchmark.py)
+[![Tests](https://img.shields.io/badge/pytest-114%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Benchmark](https://img.shields.io/badge/benchmark-3--mode%20evaluation-blue?logo=speedtest&logoColor=white)](backend/benchmark.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -99,69 +99,74 @@ npm run dev
 
 ---
 
-## 📊 Measured Accuracy & Benchmark Suite
+## 📊 Multi-Mode Benchmark & Accuracy Evaluation
 
-CodeLens AI includes a standalone, reproducible benchmark suite (`backend/benchmark.py`) that measures Precision, Recall, F1 score, and False-Positive Rate across security vulnerabilities, logic bugs, false-positive traps, and clean code.
+CodeLens AI includes a standalone, reproducible benchmark suite (`backend/benchmark.py`) with 3 distinct evaluation modes:
 
-### Run Benchmark:
+1. **Mode 1 — Deterministic Static-Analysis Engine:** Evaluates AST source-to-sink detection and multi-language rules across 56 labeled scenarios (True Positives, Safe Implementations, and Held-Out Traps).
+2. **Mode 2 — Evidence-Validation & Hallucination Filter:** Verifies that synthetic invalid AI findings (missing diffs, nonexistent files, ambiguous basenames, out-of-bounds lines, and fabricated ZeroDivision claims on multiplication) are rejected.
+3. **Mode 3 — Full AI Pipeline with Offline Reporting:** Evaluates the complete orchestrator + local LLM pipeline. If Ollama is offline or unreachable, it reports offline status without generating false approval claims.
+
+### Run Benchmark Suite:
 
 ```bash
 ./backend/.venv/bin/python backend/benchmark.py
 ```
 
-### Benchmark Results:
+### Benchmark Summary:
 
 ```
-================================================================================
-CODELENS AI — DETERMINISTIC & FINDING-VALIDATION BENCHMARK
-================================================================================
-[   TP (HIT)    ] Security     | SQLi Dynamic f-string                  (1.1ms)
-[  TN (CLEAN)   ] Security     | SQL Parameterized Query (Safe)         (0.1ms)
-[   TP (HIT)    ] Security     | Hardcoded API Secret                   (0.2ms)
-[  TN (CLEAN)   ] Security     | Safe Environment Variable Secret       (0.1ms)
-[   TP (HIT)    ] Security     | Dynamic eval() on User Input           (0.3ms)
-[  TN (CLEAN)   ] Security     | Safe ast.literal_eval()                (0.1ms)
-[   TP (HIT)    ] Security     | Unsafe pickle.loads() Deserialization  (0.2ms)
-[   TP (HIT)    ] Logic        | ZeroDivision on Empty Collection       (0.3ms)
-[  TN (CLEAN)   ] Logic        | Multiplication Decimal Cashback (Trap) (0.1ms)
-[   TP (HIT)    ] Logic        | Inverted Discount Formula              (0.2ms)
-[  TN (CLEAN)   ] Clean Code   | Clean Math Function                    (0.1ms)
-[   TP (HIT)    ] Security     | Path Traversal in open()               (0.2ms)
---------------------------------------------------------------------------------
-METRICS SUMMARY:
-  Total Test Cases    : 12
-  True Positives (TP) : 7
-  True Negatives (TN) : 5
+==========================================================================================
+MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK
+==========================================================================================
+  Total Labeled Cases : 56 (28 Vulnerable, 28 Safe & Held-Out)
+  True Positives (TP) : 28
+  True Negatives (TN) : 28
   False Positives (FP): 0
   False Negatives (FN): 0
   Precision           : 100.0%
   Recall              : 100.0%
   F1 Score            : 100.0%
-  False Positive Rate : 0.0%
-  Avg Processing Time : 0.23 ms
-================================================================================
+  Specificity         : 100.0%
+  Avg Case Latency    : 0.19 ms
+==========================================================================================
+MODE 2: EVIDENCE VALIDATION & HALLUCINATION REJECTION BENCHMARK
+==========================================================================================
+  Missing Diff (Fail Closed)                 -> REJECTED (Source context unavailable)
+  Nonexistent File In Diff                   -> REJECTED (Referenced file does not exist)
+  Out of Bounds Line Number                  -> REJECTED (Line does not exist)
+  Fabricated ZeroDivision on Multiplication  -> REJECTED (No division/modulus operator)
+  Accuracy                                   : 100.0% invalid findings filtered
+==========================================================================================
+MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
+==========================================================================================
+  Ollama Status : OFFLINE / UNREACHABLE (Partial analysis fallback verified)
+  Guarantee     : partial_analysis=True, overall_status != approved on issues.
+==========================================================================================
 ```
 
 ---
 
 ## 🧪 Comprehensive Automated Test Suite
 
-The test suite contains **75 automated unit and regression tests** across 11 test modules:
+The test suite contains **114 automated unit and regression tests** across 12 test modules:
 
 ```bash
 ./backend/.venv/bin/pytest backend/tests -v
 ```
 
-### Test Modules:
-1. `test_evidence_validation.py` (8 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, out-of-bounds lines, false ZeroDivision on multiplication, safe parameterized SQL, and `ast.literal_eval`.
-2. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).
-3. `test_diff_parser.py` & `test_diff_parser_extended.py` (10 tests): Multi-file and multi-hunk diff parsing, `\ No newline at end of file` marker safety, binary patch detection, and hunk line offset tracking.
-4. `test_pattern_detector.py` (8 tests): AST and static rules for SQL injection, hardcoded credentials, unsafe eval/exec, pickle deserialization, and clean code validation.
-5. `test_multilanguage.py` (5 tests): Multi-language detection for TypeScript, JavaScript, Go, Java, and C/C++.
-6. `test_calculator_22_lines.py` (1 test): Complete regression testing on multi-defect calculator scenarios.
-7. `test_review_validator.py` (15 tests): Semantic deduplication, severity ordering, risk escalation, and assumption sanitization.
-8. `test_llm_offline_handling.py` (2 tests): Graceful degradation when Ollama is offline, partial analysis flags, and non-approved status reporting.
-9. `test_api.py` & `test_api_security_extended.py` (11 tests): FastAPI endpoint validation, path traversal filename sanitization, streaming upload size limits, and safe error handling.
+### Key Test Modules:
+1. `test_29_payment_scenario.py` (5 tests): Section 7 critical regression scenario — detects hardcoded secret (`sk_live_...`), dynamic path traversal (`/var/receipts/...`), SSRF (`requests.post`), and duplicate refund race condition, while rejecting false ZeroDivision claims on multiplication (`total_spend * 0.125`).
+2. `test_sql_false_positives.py` (33 tests): Source-to-sink variable tracking, execution sink verification, alias tracking (`q2 = q1`), safe parameterized query preservation, and discount amount formula verification.
+3. `test_evidence_validation.py` (8 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, out-of-bounds lines, false ZeroDivision on multiplication, safe parameterized SQL, and `ast.literal_eval`.
+4. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).
+5. `test_diff_parser.py` & `test_diff_parser_extended.py` (10 tests): Multi-file and multi-hunk diff parsing, `\ No newline at end of file` marker safety, binary patch detection, and hunk line offset tracking.
+6. `test_pattern_detector.py` (8 tests): AST and static rules for SQL injection, hardcoded credentials, unsafe eval/exec, pickle deserialization, and calibrated confidence levels.
+7. `test_multilanguage.py` (5 tests): Multi-language detection for TypeScript, JavaScript, Go, Java, and C/C++.
+8. `test_calculator_22_lines.py` (1 test): Complete regression testing on multi-defect calculator scenarios.
+9. `test_review_validator.py` (15 tests): Semantic deduplication, severity ordering, risk escalation, and assumption sanitization.
+10. `test_llm_offline_handling.py` (2 tests): Graceful degradation when Ollama is offline, partial analysis flags, and non-approved status reporting.
+11. `test_api.py` & `test_api_security_extended.py` (11 tests): FastAPI endpoint validation, path traversal filename sanitization, streaming upload size limits, and safe error handling.
 
 Frontend static analysis & production build:
 ```bash

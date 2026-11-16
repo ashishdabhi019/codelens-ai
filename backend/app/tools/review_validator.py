@@ -352,30 +352,44 @@ def validate_source_evidence(
     """
     Strictly validates finding against actual source code and diff.
     Verifies:
-    1. Referenced file exists in diff.
-    2. Reported line number exists in file.
-    3. Evidence corresponds to the actual reported source location (+/- 2 lines).
+    1. Source context is available (fails closed if diff_files is empty/missing).
+    2. Referenced file matches exact repo-relative path, rejecting ambiguous basename matches.
+    3. Reported line number exists in file.
+    4. Evidence corresponds to the actual reported source location (+/- 2 lines).
        NEVER falls back to searching full_code when line is specified.
-    4. Rejects evidence duplicated from unrelated functions (>3 lines away).
-    5. Rejects false ZeroDivision claims where no division operator exists or denominator cannot be zero.
-    6. Rejects false SQL injection where function contains no SQL or query is parameterized.
-    7. Rejects false eval on ast.literal_eval.
-    8. Rejects false credential on os.getenv / environment lookup.
+    5. Rejects evidence duplicated from unrelated functions (>3 lines away).
+    6. Rejects false ZeroDivision claims where no division operator exists or denominator cannot be zero.
+    7. Rejects false SQL injection where function contains no SQL or query is parameterized.
+    8. Rejects false eval on ast.literal_eval.
+    9. Rejects false credential on os.getenv / environment lookup.
     """
     if not diff_files:
-        # If no diff files provided, cannot cross-check diff structure
-        return True, finding, None
+        # Fail closed: never mark evidence as verified when source context is missing
+        return False, None, "Source context unavailable: no diff files provided."
 
-    # Step 1: Match file in diff
+    # Step 1: Match file in diff using exact normalized path, rejecting ambiguous basenames
+    norm_finding_file = os.path.normpath(finding.file).lstrip("./")
     matched_file_key = None
-    finding_file_base = os.path.basename(finding.file)
+
+    # Step 1a: Exact normalized repo-relative path match
     for df_key in file_lines.keys():
-        if df_key == finding.file or os.path.basename(df_key) == finding_file_base:
+        if os.path.normpath(df_key).lstrip("./") == norm_finding_file:
             matched_file_key = df_key
             break
 
+    # Step 1b: Disambiguated basename matching
     if not matched_file_key:
-        return False, None, f"Referenced file '{finding.file}' does not exist in the submitted diff."
+        finding_file_base = os.path.basename(finding.file)
+        basename_matches = [
+            df_key for df_key in file_lines.keys()
+            if os.path.basename(df_key) == finding_file_base
+        ]
+        if len(basename_matches) == 1:
+            matched_file_key = basename_matches[0]
+        elif len(basename_matches) > 1:
+            return False, None, f"Ambiguous file reference: multiple files in diff match basename '{finding_file_base}': {basename_matches}"
+        else:
+            return False, None, f"Referenced file '{finding.file}' does not exist in the submitted diff."
 
     # Normalize file path in finding to match diff
     finding.file = matched_file_key
@@ -565,14 +579,19 @@ def validate_and_merge(
 
     for f in raw_findings:
         # Step A: Validate finding against source code and diff
-        valid, validated_f, reject_reason = validate_source_evidence(
-            f, diff_files, file_lines, file_all_code, seen_evidence=seen_evidence
-        )
-        if not valid or validated_f is None:
-            unverified_count += 1
-            continue
-
-        f = validated_f
+        if diff_files is not None:
+            valid, validated_f, reject_reason = validate_source_evidence(
+                f, diff_files, file_lines, file_all_code, seen_evidence=seen_evidence
+            )
+            if not valid or validated_f is None:
+                unverified_count += 1
+                continue
+            f = validated_f
+        elif not diff_files:
+            # If diff_files is explicitly an empty list, fail closed
+            if isinstance(diff_files, list) and len(diff_files) == 0:
+                unverified_count += 1
+                continue
         orig_code = line_map.get((f.file, f.line or 0)) if f.line else None
 
         # Step B: Drop findings that describe a bug in removed code that the author already fixed

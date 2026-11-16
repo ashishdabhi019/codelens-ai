@@ -106,8 +106,13 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
         self.full_source = full_source
         self.findings: List[Finding] = []
         self._reported_lines: Set[Tuple[int, str]] = set()
-        self.vulnerable_sql_vars: Dict[str, Tuple[int, str]] = {}
+        # Scope stack for function-level variable tracking (source-to-sink tracking)
+        self.scope_stack: List[Dict[str, Dict]] = [{}]
         self.dynamic_path_vars: Dict[str, Tuple[int, str]] = {}
+
+    @property
+    def current_scope(self) -> Dict[str, Dict]:
+        return self.scope_stack[-1]
 
     def _line_in_diff(self, lineno: Optional[int]) -> bool:
         if lineno is None:
@@ -124,7 +129,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
         impact: str,
         recommendation: str,
         suggested_fix: Optional[str] = None,
-        confidence: float = 1.0,
+        confidence: float = 0.85,
     ):
         key = (lineno, title)
         if key in self._reported_lines:
@@ -154,43 +159,66 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
         val = node.value
         sql_kw_regex = re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE\s+TABLE)\b', re.IGNORECASE)
 
-        # 1. Track dynamic SQL query construction
-        # e.g., query = f"SELECT id, name, balance FROM users WHERE id = {user_id}"
+        # 1. Scope-aware tracking of SQL query construction
+        # Track assignments, reassignments, and aliases without immediately reporting.
+        # Vulnerability is only reported when reaching an execution sink.
         is_dynamic_sql = False
+        is_sql = False
         sql_text = ""
 
         if isinstance(val, ast.JoinedStr):
             joined_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
-            if sql_kw_regex.search(joined_repr) and any(isinstance(v, ast.FormattedValue) for v in val.values):
-                is_dynamic_sql = True
+            if sql_kw_regex.search(joined_repr):
+                is_sql = True
                 sql_text = joined_repr
+                if any(isinstance(v, ast.FormattedValue) for v in val.values):
+                    is_dynamic_sql = True
         elif isinstance(val, ast.BinOp) and isinstance(val.op, (ast.Add, ast.Mod)):
             bin_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
-            if sql_kw_regex.search(bin_repr) and any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(val)):
-                is_dynamic_sql = True
+            if sql_kw_regex.search(bin_repr):
+                is_sql = True
                 sql_text = bin_repr
+                if any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(val)):
+                    is_dynamic_sql = True
         elif isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute) and val.func.attr == "format":
             fmt_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
             if sql_kw_regex.search(fmt_repr):
-                is_dynamic_sql = True
+                is_sql = True
                 sql_text = fmt_repr
+                if val.args or val.keywords:
+                    is_dynamic_sql = True
+        is_alias = False
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            if sql_kw_regex.search(val.value):
+                is_sql = True
+                sql_text = val.value
+                is_dynamic_sql = False
+        elif isinstance(val, ast.Name):
+            # Track aliases: q2 = q1
+            rhs_var = val.id
+            if rhs_var in self.current_scope:
+                is_alias = True
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.current_scope[target.id] = dict(self.current_scope[rhs_var])
 
-        if is_dynamic_sql:
+        if is_sql:
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    self.vulnerable_sql_vars[target.id] = (lineno, sql_text)
-                    if self._line_in_diff(lineno):
-                        self._add_finding(
-                            lineno=lineno,
-                            title="SQL Injection via dynamic query construction",
-                            category="security",
-                            severity="critical",
-                            description="Constructing SQL queries dynamically with f-strings, concatenation, or .format() allows SQL injection.",
-                            impact="Attackers can manipulate user inputs to execute arbitrary SQL commands, bypassing authorization and accessing or modifying database records.",
-                            recommendation="Use parameterized queries with placeholders: cursor.execute('SELECT ... WHERE id = ?', (param,))",
-                            suggested_fix='cursor.execute("SELECT id, name, balance FROM users WHERE id = ?", (user_id,))',
-                            confidence=1.0,
-                        )
+                    self.current_scope[target.id] = {
+                        "lineno": lineno,
+                        "text": sql_text,
+                        "dynamic": is_dynamic_sql,
+                    }
+        elif not is_alias:
+            # Reassignment to non-SQL resets dynamic SQL status for the variable in scope
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in self.current_scope:
+                    self.current_scope[target.id] = {
+                        "lineno": lineno,
+                        "text": "",
+                        "dynamic": False,
+                    }
 
         # 2. Track dynamic file paths for path traversal
         # e.g. file_path = f"/var/www/uploads/{user_id}.jpg"
@@ -218,7 +246,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                             impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
                             recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
                             suggested_fix='import os\nsafe_filename = os.path.basename(user_id) + ".jpg"\nfile_path = os.path.join("/var/www/uploads", safe_filename)',
-                            confidence=0.95,
+                            confidence=0.85,
                         )
 
         # 3. Check hardcoded secrets / credentials
@@ -259,7 +287,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                             impact="Hardcoded credentials in version control can be leaked or stolen, compromising backend services and sensitive user data.",
                             recommendation="Load sensitive secrets from environment variables or a secure secret manager (e.g. os.getenv('API_KEY')).",
                             suggested_fix='import os\nAPI_KEY = os.getenv("API_KEY")',
-                            confidence=1.0,
+                            confidence=0.95,
                         )
 
         # 4. Incorrect discount calculation formula: final_price = price * (discount / 100)
@@ -271,7 +299,15 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                 div = mult.right
                 if isinstance(div.right, ast.Constant) and div.right.value in (100, 100.0):
                     target_names = [t.id.lower() for t in node.targets if isinstance(t, ast.Name)]
-                    if any("price" in tn or "total" in tn or "cost" in tn or "final" in tn for tn in target_names):
+                    is_discount_amount = any(
+                        term in tn for tn in target_names
+                        for term in ("discount_amount", "discount_val", "discount_value", "saving", "rebate", "deduction", "discount_fee", "disc_amt")
+                    )
+                    claims_final_price = any(
+                        term in tn for tn in target_names
+                        for term in ("final_price", "discounted_price", "net_price", "payable", "amount_to_pay", "total_due", "charge_amount", "price_after_discount")
+                    )
+                    if claims_final_price and not is_discount_amount:
                         disc_name = div.left.id if isinstance(div.left, ast.Name) else "discount"
                         p_name = left_name or "price"
                         self._add_finding(
@@ -283,20 +319,24 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                             impact="Customers will be billed only the discount amount instead of the discounted total (e.g. 20% discount on $100 results in $20 charged instead of $80).",
                             recommendation=f"Calculate final price as `{p_name} * (1 - {disc_name} / 100)` and validate non-negative values.",
                             suggested_fix=f"if {disc_name} < 0 or {p_name} < 0:\n    raise ValueError('Values must be non-negative')\nfinal_price = {p_name} * (1 - {disc_name} / 100)",
-                            confidence=1.0,
+                            confidence=0.90,
                         )
 
         self.generic_visit(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef):
-        fn_name = node.name.lower()
-        if ("transfer" in fn_name or "pay" in fn_name) and any(self._line_in_diff(n.lineno) for n in ast.walk(node) if hasattr(n, "lineno")):
+    def _analyze_function_node(self, node: ast.AST):
+        """Analyzes logic bugs, business constraints, and race conditions inside a function."""
+        fn_name = getattr(node, "name", "").lower()
+        fn_lines_in_diff = any(self._line_in_diff(n.lineno) for n in ast.walk(node) if hasattr(n, "lineno"))
+
+        # 1. Money transfer logic verification
+        if ("transfer" in fn_name or "pay" in fn_name) and fn_lines_in_diff:
             has_balance_check = False
             has_receiver_check = False
             returns_unconditional_success = False
             success_lineno = None
 
-            for stmt in node.body:
+            for stmt in getattr(node, "body", []):
                 if isinstance(stmt, ast.If):
                     test_str = ast.unparse(stmt.test) if hasattr(ast, "unparse") else ""
                     if ">=" in test_str or ">" in test_str or "balance" in test_str:
@@ -313,7 +353,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     has_receiver_check = True
 
             if has_balance_check and returns_unconditional_success and not has_receiver_check:
-                target_line = success_lineno if success_lineno and self._line_in_diff(success_lineno) else node.lineno
+                target_line = success_lineno if success_lineno and self._line_in_diff(success_lineno) else getattr(node, "lineno", 0)
                 self._add_finding(
                     lineno=target_line,
                     title="Unconditional success return and missing receiver verification in transfer_money",
@@ -323,56 +363,138 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="Failed transfers report success to callers, and transfers to invalid recipient accounts cause funds to be permanently debited without crediting anyone.",
                     recommendation="Verify recipient existence before updating balances, return an error on insufficient balance, and execute transfers inside a transaction with rollback on failure.",
                     suggested_fix=None,
-                    confidence=1.0,
+                    confidence=0.85,
                 )
 
+        # 2. Race condition / Duplicate refund / Order of operations flaw
+        # Detects when external actions (e.g. requests.post) execute before idempotency checks (e.g. in self.processed_transactions)
+        if any(term in fn_name for term in ("refund", "pay", "charge", "transfer", "payout", "process")):
+            external_call_lineno = None
+            idempotency_check_lineno = None
+
+            for stmt in getattr(node, "body", []):
+                stmt_lineno = getattr(stmt, "lineno", 0)
+                # Find external network side effects
+                for sub in ast.walk(stmt):
+                    if isinstance(sub, ast.Call):
+                        cname = _get_call_name(sub).lower()
+                        if any(cname.startswith(p) for p in ("requests.", "httpx.", "urllib.", "gateway.")):
+                            if external_call_lineno is None:
+                                external_call_lineno = stmt_lineno
+                                break
+
+                # Find subsequent idempotency check or registration
+                if external_call_lineno is not None and stmt_lineno > external_call_lineno:
+                    if isinstance(stmt, ast.If):
+                        test_str = ast.unparse(stmt.test).lower() if hasattr(ast, "unparse") else ""
+                        if any(term in test_str for term in ("processed", "seen", "existing", "duplicate", "history", "recorded")):
+                            idempotency_check_lineno = stmt_lineno
+                            break
+                    for sub in ast.walk(stmt):
+                        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+                            attr_name = sub.func.attr
+                            caller_name = ast.unparse(sub.func.value).lower() if hasattr(ast, "unparse") else ""
+                            if attr_name in ("add", "append", "insert") and any(term in caller_name for term in ("processed", "seen", "transactions", "records")):
+                                idempotency_check_lineno = stmt_lineno
+                                break
+
+            if external_call_lineno and idempotency_check_lineno:
+                target_line = idempotency_check_lineno if self._line_in_diff(idempotency_check_lineno) else (
+                    external_call_lineno if self._line_in_diff(external_call_lineno) else getattr(node, "lineno", 0)
+                )
+                self._add_finding(
+                    lineno=target_line,
+                    title="Race condition and duplicate processing: external operation executed before idempotency check",
+                    category="bug",
+                    severity="high",
+                    description="External operation (HTTP request / refund webhook) is dispatched before checking and recording idempotency state in `self.processed_transactions`.",
+                    impact="Concurrent or repeated requests can trigger multiple duplicate refunds before the transaction is registered as processed.",
+                    recommendation="Check idempotency state and register the transaction before initiating external operations.",
+                    suggested_fix=None,
+                    confidence=0.85,
+                )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        # Push isolated function scope for local variable tracking
+        self.scope_stack.append({})
+        self._analyze_function_node(node)
         self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        # Push isolated async function scope
+        self.scope_stack.append({})
+        self._analyze_function_node(node)
+        self.generic_visit(node)
+        self.scope_stack.pop()
 
     def visit_Call(self, node: ast.Call):
         lineno = getattr(node, "lineno", 0)
         call_name = _get_call_name(node)
 
-        # 1. SQL Injection via execute() or query execution
-        if _is_method_on(node, {"execute", "executemany", "raw", "select"}):
-            if node.args:
-                first_arg = node.args[0]
-                is_sqli = False
-                fix_snippet = None
+        # 1. SQL Injection via execute() or query execution at verified database sink
+        is_db_sink = False
+        db_method_names = {"execute", "executemany", "raw", "select", "fetch_all", "fetch_one"}
+        if isinstance(node.func, ast.Attribute) and node.func.attr in db_method_names:
+            caller_repr = ast.unparse(node.func.value).lower() if hasattr(ast, "unparse") else ""
+            non_db_callers = ("thread", "pool", "executor", "task", "job", "command", "cmd", "action", "runner")
+            if any(nd in caller_repr for nd in non_db_callers) and not any(db_kw in caller_repr for db_kw in ("db", "sql", "cursor", "conn", "session", "cur")):
+                is_db_sink = False
+            else:
+                is_db_sink = True
 
-                # Check if f-string / JoinedStr
-                if isinstance(first_arg, ast.JoinedStr):
+        if is_db_sink and node.args:
+            first_arg = node.args[0]
+            is_sqli = False
+            fix_snippet = None
+            target_line = lineno
+            sql_kw_regex = re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE\s+TABLE)\b', re.IGNORECASE)
+
+            # Check if inline f-string
+            if isinstance(first_arg, ast.JoinedStr):
+                joined_repr = ast.unparse(first_arg) if hasattr(ast, "unparse") else ""
+                if sql_kw_regex.search(joined_repr) and any(isinstance(v, ast.FormattedValue) for v in first_arg.values):
                     is_sqli = True
                     fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
-                # Check if string concatenation with variables
-                elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, (ast.Add, ast.Mod)):
-                    if any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(first_arg)):
-                        is_sqli = True
-                        fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
-                # Check if .format() call
-                elif isinstance(first_arg, ast.Call) and _is_method_on(first_arg, {"format"}):
+            # Check if inline string concatenation with variables
+            elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, (ast.Add, ast.Mod)):
+                bin_repr = ast.unparse(first_arg) if hasattr(ast, "unparse") else ""
+                if sql_kw_regex.search(bin_repr) and any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.FormattedValue)) for n in ast.walk(first_arg)):
                     is_sqli = True
                     fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
-                # Check if variable previously identified as vulnerable dynamic SQL
-                elif isinstance(first_arg, ast.Name) and first_arg.id in self.vulnerable_sql_vars:
-                    assign_line, _ = self.vulnerable_sql_vars[first_arg.id]
-                    if any(f.line == assign_line and "sql" in f.title.lower() for f in self.findings):
-                        is_sqli = False
-                    else:
-                        is_sqli = True
-                        fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))'
+            # Check if inline .format() call
+            elif isinstance(first_arg, ast.Call) and _is_method_on(first_arg, {"format"}):
+                fmt_repr = ast.unparse(first_arg) if hasattr(ast, "unparse") else ""
+                if sql_kw_regex.search(fmt_repr):
+                    is_sqli = True
+                    fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))'
+            # Check if variable tracked as dynamic SQL in CURRENT SCOPE
+            elif isinstance(first_arg, ast.Name) and first_arg.id in self.current_scope:
+                var_info = self.current_scope[first_arg.id]
+                if var_info.get("dynamic") is True:
+                    is_sqli = True
+                    fix_snippet = 'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))'
+                    if not self._line_in_diff(lineno) and self._line_in_diff(var_info.get("lineno")):
+                        target_line = var_info.get("lineno")
 
-                if is_sqli and self._line_in_diff(lineno):
-                    self._add_finding(
-                        lineno=lineno,
-                        title="SQL Injection via dynamic query construction",
-                        category="security",
-                        severity="critical",
-                        description="Constructing SQL queries dynamically with f-strings, concatenation, or .format() allows SQL injection.",
-                        impact="Attackers can manipulate user inputs to execute arbitrary SQL commands, bypassing authorization and accessing or modifying database records.",
-                        recommendation="Use parameterized queries with placeholders: cursor.execute('SELECT ... WHERE id = ?', (param,))",
-                        suggested_fix=fix_snippet,
-                        confidence=1.0,
-                    )
+            # Check if parameterized placeholders are used safely
+            if is_sqli and isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                if re.search(r'(\?|%s|\$1)', first_arg.value) and len(node.args) >= 2:
+                    is_sqli = False
+
+            if is_sqli and (self._line_in_diff(target_line) or self._line_in_diff(lineno)):
+                report_line = target_line if self._line_in_diff(target_line) else lineno
+                self._add_finding(
+                    lineno=report_line,
+                    title="SQL Injection via dynamic query construction",
+                    category="security",
+                    severity="critical",
+                    description="Constructing SQL queries dynamically with f-strings, concatenation, or .format() and executing them in a database sink allows SQL injection.",
+                    impact="Attackers can manipulate user inputs to execute arbitrary SQL commands, bypassing authorization and accessing or modifying database records.",
+                    recommendation="Use parameterized queries with placeholders: cursor.execute('SELECT ... WHERE id = ?', (param,))",
+                    suggested_fix=fix_snippet,
+                    confidence=0.95,
+                )
 
         # 2. Dangerous eval() and exec()
         if call_name in ("eval", "exec"):
@@ -389,7 +511,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                         impact="An attacker who controls or influences the input can execute arbitrary Python commands with the application's privileges.",
                         recommendation=f"Avoid {call_name}(). For evaluating data structures safely, use ast.literal_eval().",
                         suggested_fix=f"import ast\nreturn ast.literal_eval({arg_name})",
-                        confidence=1.0,
+                        confidence=0.95,
                     )
 
         # 3. Unsafe Deserialization: pickle.loads / pickle.load
@@ -405,7 +527,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="Deserializing untrusted data with pickle allows remote code execution (RCE).",
                     recommendation="Do not use pickle for untrusted input. Use safe data formats like json or protocol buffers.",
                     suggested_fix=f"import json\nreturn json.loads({arg_name})",
-                    confidence=1.0,
+                    confidence=0.95,
                 )
 
         # 4. Command Injection: os.system()
@@ -420,7 +542,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="Attackers can inject shell metacharacters (;, &, |) to execute arbitrary operating system commands.",
                     recommendation="Use subprocess.run() with argument lists and shell=False.",
                     suggested_fix='import subprocess\nsubprocess.run(["command", arg], check=True, shell=False)',
-                    confidence=1.0,
+                    confidence=0.90,
                 )
 
         # 5. Dangerous subprocess with shell=True
@@ -440,7 +562,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="If any portion of command arguments derives from untrusted input, arbitrary shell commands can be executed.",
                     recommendation="Pass arguments as a list of strings and set shell=False (the default).",
                     suggested_fix='subprocess.run(["command", arg], check=True, shell=False)',
-                    confidence=1.0,
+                    confidence=0.90,
                 )
 
         # 6. Insecure temporary files: tempfile.mktemp()
@@ -455,7 +577,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="An attacker can create a symlink at the returned path before the application creates the file, overwriting arbitrary files.",
                     recommendation="Use tempfile.NamedTemporaryFile() or tempfile.mkstemp() instead.",
                     suggested_fix="import tempfile\nwith tempfile.NamedTemporaryFile(delete=True) as temp_file:\n    pass",
-                    confidence=1.0,
+                    confidence=0.85,
                 )
 
         # 7. Password hashing and cryptographic hashing: hashlib.md5 or hashlib.sha1
@@ -485,7 +607,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                         impact="Attackers can generate hash collisions to forge signatures, bypass checksum validation, or crack passwords.",
                         recommendation="Use modern secure hash algorithms such as hashlib.sha256() or hashlib.sha3_256().",
                         suggested_fix="import hashlib\nhash_val = hashlib.sha256(data).hexdigest()",
-                        confidence=0.95,
+                        confidence=0.85,
                     )
 
         # 8. SSRF via requests.* or httpx.* to variable url
@@ -507,7 +629,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                         impact="Attackers can provide internal network URLs (e.g. 169.254.169.254 or localhost) to access cloud metadata or intranet services.",
                         recommendation="Validate destination URLs against an allowlist of approved domains and block loopback/private IP ranges.",
                         suggested_fix=None,
-                        confidence=0.9,
+                        confidence=0.80,
                     )
 
         # 9. Path traversal via open(f"...") or open(variable_path)
@@ -521,7 +643,6 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     is_path_traversal = True
             elif isinstance(path_arg, ast.Name) and path_arg.id in self.dynamic_path_vars:
                 assign_lineno, _ = self.dynamic_path_vars[path_arg.id]
-                # If already reported at assignment line, skip
                 if not any(f.line == assign_lineno and "path traversal" in f.title.lower() for f in self.findings):
                     is_path_traversal = True
 
@@ -535,7 +656,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
                     recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
                     suggested_fix='import os\nsafe_name = os.path.basename(user_id)\nfile_path = os.path.join(ALLOWED_DIR, f"{safe_name}.jpg")',
-                    confidence=0.95,
+                    confidence=0.85,
                 )
 
         self.generic_visit(node)
@@ -546,12 +667,10 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
             # 1. Division by len(collection) without guard -> ZeroDivisionError
             if isinstance(node.op, ast.Div):
                 right = node.right
-                # Check if right operand is len(...)
                 if isinstance(right, ast.Call) and isinstance(right.func, ast.Name) and right.func.id == "len":
                     arg_name = "values"
                     if right.args and isinstance(right.args[0], ast.Name):
                         arg_name = right.args[0].id
-                    # Check if there is an upfront guard on this arg
                     guard_exists = bool(
                         re.search(rf'if\s+(?:not\s+{arg_name}|len\({arg_name}\)\s*==\s*0)\b', self.full_source)
                     )
@@ -565,7 +684,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                             impact=f"Calling this function with an empty list or collection triggers ZeroDivisionError and crashes the process.",
                             recommendation=f"Add an upfront guard: if not {arg_name}: return 0.0 before performing division.",
                             suggested_fix=f"if not {arg_name}:\n    return 0.0\nreturn total / len({arg_name})",
-                            confidence=1.0,
+                            confidence=0.85,
                         )
 
                 # 2. Inverted discount formula: price / (1 - discount/100)
@@ -581,7 +700,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                                 impact="Customers will be overcharged; e.g. price 1000 with 20% discount becomes 1250 instead of 800.",
                                 recommendation="Multiply by (1 - discount/100) or subtract the discount amount: price * (1 - discount_percent / 100)",
                                 suggested_fix="final_price = price * (1 - discount_percent / 100)",
-                                confidence=1.0,
+                                confidence=0.90,
                             )
 
         self.generic_visit(node)
@@ -601,7 +720,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="Applying arbitrary discount values without specification could result in revenue loss or customer billing discrepancies.",
                     recommendation="Verify the intended tier discount policy with product requirements before modifying discount rates.",
                     suggested_fix=None,
-                    confidence=1.0,
+                    confidence=0.80,
                 )
             # Check missing negative value validation in shipping calculation
             elif "return weight * rate_per_kg" in line_text:
@@ -614,7 +733,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     impact="Passing negative weight or negative rate produces an invalid negative shipping charge.",
                     recommendation="Add input validation to ensure weight and rate_per_kg are non-negative before computing shipping cost.",
                     suggested_fix='if weight < 0 or rate_per_kg < 0:\n    raise ValueError("Weight and rate must be non-negative")\nreturn weight * rate_per_kg',
-                    confidence=1.0,
+                    confidence=0.80,
                 )
 
         self.generic_visit(node)
@@ -698,7 +817,7 @@ def detect_risky_patterns(diff_content: str, diff_files: List[DiffFile]) -> List
                                         impact="Hardcoded credentials in version control can be leaked or stolen, compromising backend services.",
                                         recommendation="Load sensitive credentials from environment variables or a secrets manager.",
                                         suggested_fix='import os\nAPI_KEY = os.getenv("API_KEY")',
-                                        confidence=1.0,
+                                        confidence=0.95,
                                         fix_verification_status="validated_syntax",
                                     )
                                 )
@@ -722,7 +841,7 @@ def detect_risky_patterns(diff_content: str, diff_files: List[DiffFile]) -> List
                                         impact=impact,
                                         recommendation=recommendation,
                                         suggested_fix=suggested_fix,
-                                        confidence=1.0,
+                                        confidence=0.80,
                                         fix_verification_status="proposed",
                                     )
                                 )

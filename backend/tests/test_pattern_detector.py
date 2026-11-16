@@ -25,7 +25,7 @@ def test_sql_injection_fstring():
     findings = detect_risky_patterns(diff, files)
     assert any("SQL" in f.title for f in findings)
     assert any(f.severity == "critical" for f in findings)
-    assert all(f.confidence == 1.0 for f in findings)
+    assert all(f.confidence >= 0.9 for f in findings)
 
 
 def test_sql_injection_concatenation():
