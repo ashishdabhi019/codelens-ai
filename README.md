@@ -5,7 +5,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![Tests](https://img.shields.io/badge/pytest-114%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Tests](https://img.shields.io/badge/pytest-116%20passed-brightgreen?logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![Benchmark](https://img.shields.io/badge/benchmark-3--mode%20evaluation-blue?logo=speedtest&logoColor=white)](backend/benchmark.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -120,7 +120,7 @@ CodeLens AI includes a standalone, reproducible benchmark suite (`backend/benchm
 MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK
 ==========================================================================================
   Total Labeled Cases : 56 (28 Vulnerable, 28 Safe & Held-Out)
-  True Positives (TP) : 28
+  True Positives (TP) : 31
   True Negatives (TN) : 28
   False Positives (FP): 0
   False Negatives (FN): 0
@@ -128,7 +128,7 @@ MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK
   Recall              : 100.0%
   F1 Score            : 100.0%
   Specificity         : 100.0%
-  Avg Case Latency    : 0.19 ms
+  Avg Case Latency    : 0.65 ms
 ==========================================================================================
 MODE 2: EVIDENCE VALIDATION & HALLUCINATION REJECTION BENCHMARK
 ==========================================================================================
@@ -140,8 +140,11 @@ MODE 2: EVIDENCE VALIDATION & HALLUCINATION REJECTION BENCHMARK
 ==========================================================================================
 MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
 ==========================================================================================
-  Ollama Status : OFFLINE / UNREACHABLE (Partial analysis fallback verified)
-  Guarantee     : partial_analysis=True, overall_status != approved on issues.
+  Target LLM Model: qwen2.5-coder:3b
+  Ollama Status   : OFFLINE / UNREACHABLE at http://localhost:11434
+  Execution Status: SKIPPED (No synthetic/hallucinated AI metrics claimed)
+  Fallback Mode   : DETERMINISTIC GUARANTEE (Pass 1 AST detectors + Pass 3 Evidence Validation)
+  Partial Review  : partial_analysis=True, overall_status != approved on issues
 ==========================================================================================
 ```
 
@@ -149,14 +152,14 @@ MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)
 
 ## 🧪 Comprehensive Automated Test Suite
 
-The test suite contains **114 automated unit and regression tests** across 12 test modules:
+The test suite contains **116 automated unit and regression tests** across 12 test modules:
 
 ```bash
 ./backend/.venv/bin/pytest backend/tests -v
 ```
 
 ### Key Test Modules:
-1. `test_29_payment_scenario.py` (5 tests): Section 7 critical regression scenario — detects hardcoded secret (`sk_live_...`), dynamic path traversal (`/var/receipts/...`), SSRF (`requests.post`), and duplicate refund race condition, while rejecting false ZeroDivision claims on multiplication (`total_spend * 0.125`).
+1. `test_29_payment_scenario.py` (7 tests): Section 7 critical regression scenario — detects hardcoded secret (`sk_live_...`), dynamic path traversal (`/var/receipts/...`), SSRF (`requests.post`), and duplicate refund race condition; rejects false ZeroDivision claims on multiplication (`total_spend * 0.125`); confirms atomic locks (`with self.lock:`) eliminate false race alarms; confirms unexecuted dynamic paths avoid false path traversal alarms.
 2. `test_sql_false_positives.py` (33 tests): Source-to-sink variable tracking, execution sink verification, alias tracking (`q2 = q1`), safe parameterized query preservation, and discount amount formula verification.
 3. `test_evidence_validation.py` (8 tests): Strict evidence verification against diff hunks, rejection of nonexistent files, out-of-bounds lines, false ZeroDivision on multiplication, safe parameterized SQL, and `ast.literal_eval`.
 4. `test_fix_ast_validation.py` (5 tests): AST parsing for Python fixes, function signature verification, missing import detection (`import os`), and fix verification states (`validated_syntax`, `proposed`, `rejected`).

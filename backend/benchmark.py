@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.tools.diff_parser import parse_git_diff
 from app.tools.pattern_detector import detect_risky_patterns
 from app.tools.review_validator import validate_and_merge
-from app.schemas.findings import ReviewResult
+from app.schemas.findings import Finding, ReviewResult
 
 
 @dataclass
@@ -30,6 +30,7 @@ class BenchmarkCase:
     code_diff: str
     is_vulnerable: bool
     expected_vulnerability: Optional[str] = None
+    expected_vulnerabilities: Optional[List[str]] = None
     description: str = ""
     case_id: str = ""
     expected_file: Optional[str] = None
@@ -941,6 +942,7 @@ diff --git a/payment_processor.py b/payment_processor.py
 +""",
         is_vulnerable=True,
         expected_vulnerability="credential",
+        expected_vulnerabilities=["credential", "path traversal", "ssrf", "race condition"],
         description="29-line PaymentProcessor: hardcoded secret, path traversal, SSRF, duplicate refund race condition, multiplication cashback",
         behavior_rationale="Must detect 4 real vulnerabilities and reject false ZeroDivisionError on multiplication.",
         is_held_out=False,
@@ -1014,10 +1016,54 @@ def format_metric(val: Optional[float]) -> str:
     return f"{val * 100:.1f}%" if val is not None else "N/A"
 
 
+def verify_finding_strict(f: Finding, case: BenchmarkCase, diff_files: List) -> tuple[bool, bool, str]:
+    """
+    Multi-factor verification of finding integrity:
+    1. File path verification (must match a file in diff_files, and case.expected_file if specified)
+    2. Line number verification (must be an added line in diff_files, and case.expected_lines if specified)
+    3. Evidence verification (must be non-empty string and present in diff)
+    4. Vulnerability category and semantic match against expected vulnerability
+    Returns (is_structurally_valid, matches_expected, detail)
+    """
+    valid_files = [df.new_path or df.old_path for df in diff_files]
+    file_ok = f.file in valid_files or any(vf.endswith(f.file) or f.file.endswith(vf) for vf in valid_files)
+    if case.expected_file:
+        file_ok = file_ok and (f.file.endswith(case.expected_file) or case.expected_file.endswith(f.file))
+    if not file_ok:
+        return False, False, f"Invalid file path: {f.file}"
+
+    added_lines = {
+        l.line_number
+        for df in diff_files
+        for h in df.hunks
+        for l in h.lines
+        if l.change_type == "added" and l.line_number is not None
+    }
+    line_ok = f.line in added_lines
+    if case.expected_lines:
+        line_ok = line_ok and (f.line in case.expected_lines)
+    if not line_ok:
+        return False, False, f"Invalid line {f.line} (not in added diff lines)"
+
+    if not f.evidence or not f.evidence.strip():
+        return False, False, "Evidence is empty or missing"
+
+    if not case.is_vulnerable:
+        return True, False, "Unexpected finding on safe code"
+
+    expected_list = case.expected_vulnerabilities or ([case.expected_vulnerability] if case.expected_vulnerability else [])
+    haystack = f"{f.title} {f.root_cause or ''} {f.description} {f.category}".lower()
+    for exp in expected_list:
+        if exp.lower() in haystack:
+            return True, True, exp.lower()
+
+    return True, False, "Unrelated finding"
+
+
 def evaluate_mode1_deterministic_engine(dataset: List[BenchmarkCase]) -> Dict:
     """
     Mode 1: Evaluates the deterministic AST & static-analysis engine.
-    Measures precision, recall, specificity, F1, and latency.
+    Measures precision, recall, specificity, F1, and latency with strict multi-factor verification.
     """
     print("\n" + "=" * 90)
     print("MODE 1: DETERMINISTIC STATIC-ANALYSIS & PATTERN DETECTION BENCHMARK")
@@ -1048,40 +1094,65 @@ def evaluate_mode1_deterministic_engine(dataset: List[BenchmarkCase]) -> Dict:
         durations.append(elapsed)
 
         findings = validated_res.findings
-        has_finding = len(findings) > 0
-
         cat = case.category
         if cat not in category_stats:
             category_stats[cat] = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
-        matched = False
-        if has_finding and case.is_vulnerable:
-            if case.expected_vulnerability:
-                matched = any(
-                    case.expected_vulnerability in (f.title + " " + (f.root_cause or "")).lower()
-                    for f in findings
-                )
-            else:
-                matched = True
+        case_tp = 0
+        case_fp = 0
+        case_tn = 0
+        case_fn = 0
+
+        expected_list = case.expected_vulnerabilities or ([case.expected_vulnerability] if case.expected_vulnerability else [])
+        matched_expected_vulns = set()
 
         if case.is_vulnerable:
-            if has_finding and matched:
-                status = "TP (HIT)"
-                tp += 1
-                category_stats[cat]["tp"] += 1
-            else:
-                status = "FN (MISSED)"
-                fn += 1
-                category_stats[cat]["fn"] += 1
+            for f in findings:
+                is_valid, matches, detail = verify_finding_strict(f, case, diff_files)
+                if not is_valid:
+                    case_fp += 1
+                elif matches:
+                    if detail not in matched_expected_vulns:
+                        matched_expected_vulns.add(detail)
+                        case_tp += 1
+                    else:
+                        case_fp += 1
+                else:
+                    case_fp += 1
+
+            for exp in expected_list:
+                if exp.lower() not in matched_expected_vulns:
+                    case_fn += 1
         else:
-            if not has_finding:
-                status = "TN (CLEAN)"
-                tn += 1
-                category_stats[cat]["tn"] += 1
+            if len(findings) == 0:
+                case_tn += 1
             else:
-                status = "FP (FALSE ALARM)"
-                fp += 1
-                category_stats[cat]["fp"] += 1
+                case_fp += len(findings)
+
+        tp += case_tp
+        fp += case_fp
+        tn += case_tn
+        fn += case_fn
+
+        category_stats[cat]["tp"] += case_tp
+        category_stats[cat]["fp"] += case_fp
+        category_stats[cat]["tn"] += case_tn
+        category_stats[cat]["fn"] += case_fn
+
+        if case.is_vulnerable:
+            if case_tp > 0 and case_fp == 0 and case_fn == 0:
+                status = "TP (HIT)"
+            elif case_tp > 0 and case_fp > 0:
+                status = "TP+FP (MIX)"
+            elif case_fn > 0:
+                status = "FN (MISSED)"
+            else:
+                status = "FP (NO MATCH)"
+        else:
+            if case_fp == 0:
+                status = "TN (CLEAN)"
+            else:
+                status = "FP (ALARM)"
 
         label = f"[{case_id}] {case.name[:30]}"
         print(f"[{status:^13}] | {cat:<18} | {label:<38} | {elapsed*1000:>6.1f}ms")
@@ -1235,15 +1306,19 @@ def evaluate_mode3_full_ai_pipeline() -> Dict:
     """
     Mode 3: Complete AI code-review pipeline evaluation.
     Checks Ollama local LLM connectivity; if offline, reports partial-review guarantee.
+    Clearly identifies unavailable models and skipped evaluation modes without fabricating metrics.
     """
     print("\n" + "=" * 90)
     print("MODE 3: FULL AI CODE-REVIEW PIPELINE BENCHMARK (ORCHESTRATOR + LLM)")
     print("=" * 90)
 
+    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b")
+    ollama_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
     import urllib.request
     ollama_online = False
     try:
-        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             if resp.status == 200:
                 ollama_online = True
@@ -1251,17 +1326,26 @@ def evaluate_mode3_full_ai_pipeline() -> Dict:
         ollama_online = False
 
     if not ollama_online:
-        print("  Ollama Status : OFFLINE / UNREACHABLE")
-        print("  Pipeline Mode : Deterministic fallback active (PASS 1 + PASS 3).")
-        print("  Guarantee     : partial_analysis=True, overall_status != approved on issues.")
-        print("  Note          : LLM semantic evaluation skipped; deterministic rules continue running.")
+        print(f"  Target LLM Model: {model_name}")
+        print(f"  Ollama Status   : OFFLINE / UNREACHABLE at {ollama_url}")
+        print(f"  Execution Status: SKIPPED (No synthetic/hallucinated AI metrics claimed)")
+        print(f"  Fallback Mode   : DETERMINISTIC GUARANTEE (Pass 1 AST detectors + Pass 3 Evidence Validation)")
+        print(f"  Partial Review  : partial_analysis=True, overall_status != approved on issues")
         print("=" * 90)
-        return {"status": "offline", "llm_available": False}
+        return {
+            "status": "skipped",
+            "llm_available": False,
+            "model": model_name,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+        }
     else:
-        print("  Ollama Status : ONLINE (Local LLM service connected).")
-        print("  Full multi-pass review ready for end-to-end semantic inspection.")
+        print(f"  Target LLM Model: {model_name}")
+        print(f"  Ollama Status   : ONLINE (Service connected at {ollama_url})")
+        print(f"  Execution Status: READY for live semantic evaluation")
         print("=" * 90)
-        return {"status": "online", "llm_available": True}
+        return {"status": "online", "llm_available": True, "model": model_name}
 
 
 def evaluate_benchmark():

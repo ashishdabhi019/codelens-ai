@@ -248,3 +248,62 @@ def test_validate_source_evidence_rejects_ambiguous_basename():
     assert valid is False
     assert f_out is None
     assert "ambiguous" in reason.lower()
+
+
+def test_synchronized_payment_processor_avoids_race_condition():
+    """Payment processor wrapped in an atomic lock must not trigger race condition findings."""
+    sync_code = """\
+import threading
+import requests
+
+class SynchronizedProcessor:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.processed = set()
+
+    def process_refund(self, tx_id: str, amount: float):
+        with self.lock:
+            # Synchronized critical section
+            requests.post("https://api.payments.internal/webhook", json={"tx": tx_id})
+            if tx_id in self.processed:
+                raise ValueError("Duplicate")
+            self.processed.add(tx_id)
+            return {"status": "ok"}
+"""
+    lines = sync_code.splitlines()
+    header = [
+        "diff --git a/sync_proc.py b/sync_proc.py",
+        "--- /dev/null",
+        "+++ b/sync_proc.py",
+        f"@@ -0,0 +1,{len(lines)} @@",
+    ]
+    diff = "\n".join(header + [f"+{l}" for l in lines]) + "\n"
+    diff_files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, diff_files)
+
+    # Must NOT produce race condition or duplicate processing alarms
+    assert not any("race condition" in f.title.lower() or "duplicate" in f.title.lower() for f in findings)
+
+
+def test_unexecuted_dynamic_file_path_avoids_path_traversal():
+    """Constructing a file path string that is never passed to open() or a file sink must not trigger path traversal."""
+    unexecuted_code = """\
+def build_report_path(user_id: str):
+    # Dynamic path string formed but never opened
+    report_filename = f"/var/reports/{user_id}.pdf"
+    return "Path calculated"
+"""
+    lines = unexecuted_code.splitlines()
+    header = [
+        "diff --git a/path_calc.py b/path_calc.py",
+        "--- /dev/null",
+        "+++ b/path_calc.py",
+        f"@@ -0,0 +1,{len(lines)} @@",
+    ]
+    diff = "\n".join(header + [f"+{l}" for l in lines]) + "\n"
+    diff_files = parse_git_diff(diff)
+    findings = detect_risky_patterns(diff, diff_files)
+
+    # Must NOT emit path traversal finding
+    assert not any("path traversal" in f.title.lower() for f in findings)
+

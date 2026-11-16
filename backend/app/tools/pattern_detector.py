@@ -221,7 +221,7 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                     }
 
         # 2. Track dynamic file paths for path traversal
-        # e.g. file_path = f"/var/www/uploads/{user_id}.jpg"
+        # Dynamic paths are registered in scope; finding is only emitted if traced to a file operation sink
         is_dynamic_path = False
         if isinstance(val, ast.JoinedStr):
             joined_repr = ast.unparse(val) if hasattr(ast, "unparse") else ""
@@ -236,18 +236,6 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     self.dynamic_path_vars[target.id] = (lineno, target.id)
-                    if self._line_in_diff(lineno):
-                        self._add_finding(
-                            lineno=lineno,
-                            title="Path Traversal via dynamic file path",
-                            category="security",
-                            severity="high",
-                            description="Constructing filesystem paths directly with formatted user input allows directory traversal attacks.",
-                            impact="An attacker can pass relative path sequences (e.g. '../../etc/passwd') to read or overwrite arbitrary files.",
-                            recommendation="Sanitize input using os.path.basename() and validate paths against an allowed base directory.",
-                            suggested_fix='import os\nsafe_filename = os.path.basename(user_id) + ".jpg"\nfile_path = os.path.join("/var/www/uploads", safe_filename)',
-                            confidence=0.85,
-                        )
 
         # 3. Check hardcoded secrets / credentials
         if self._line_in_diff(lineno):
@@ -369,50 +357,67 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
         # 2. Race condition / Duplicate refund / Order of operations flaw
         # Detects when external actions (e.g. requests.post) execute before idempotency checks (e.g. in self.processed_transactions)
         if any(term in fn_name for term in ("refund", "pay", "charge", "transfer", "payout", "process")):
-            external_call_lineno = None
-            idempotency_check_lineno = None
-
-            for stmt in getattr(node, "body", []):
-                stmt_lineno = getattr(stmt, "lineno", 0)
-                # Find external network side effects
-                for sub in ast.walk(stmt):
-                    if isinstance(sub, ast.Call):
-                        cname = _get_call_name(sub).lower()
-                        if any(cname.startswith(p) for p in ("requests.", "httpx.", "urllib.", "gateway.")):
-                            if external_call_lineno is None:
-                                external_call_lineno = stmt_lineno
-                                break
-
-                # Find subsequent idempotency check or registration
-                if external_call_lineno is not None and stmt_lineno > external_call_lineno:
-                    if isinstance(stmt, ast.If):
-                        test_str = ast.unparse(stmt.test).lower() if hasattr(ast, "unparse") else ""
-                        if any(term in test_str for term in ("processed", "seen", "existing", "duplicate", "history", "recorded")):
-                            idempotency_check_lineno = stmt_lineno
+            # Distinguish suspicious operation order from proven unmitigated race condition:
+            # If the block or function is guarded by a lock (e.g. `with self.lock:`, `with lock:`)
+            # or atomic transactions (`with transaction.atomic():`), synchronization mitigates race conditions.
+            has_atomic_guard = False
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.With):
+                    for item in sub.items:
+                        item_str = ast.unparse(item.context_expr).lower() if hasattr(ast, "unparse") else ""
+                        if any(term in item_str for term in ("lock", "mutex", "atomic", "transaction", "semaphore", "sync")):
+                            has_atomic_guard = True
                             break
+                elif isinstance(sub, ast.Call):
+                    cname = _get_call_name(sub).lower()
+                    if any(term in cname for term in ("acquire", "begin_transaction", "lock")):
+                        has_atomic_guard = True
+
+            if not has_atomic_guard:
+                external_call_lineno = None
+                idempotency_check_lineno = None
+
+                for stmt in getattr(node, "body", []):
+                    stmt_lineno = getattr(stmt, "lineno", 0)
+                    # Find external network side effects
                     for sub in ast.walk(stmt):
-                        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
-                            attr_name = sub.func.attr
-                            caller_name = ast.unparse(sub.func.value).lower() if hasattr(ast, "unparse") else ""
-                            if attr_name in ("add", "append", "insert") and any(term in caller_name for term in ("processed", "seen", "transactions", "records")):
+                        if isinstance(sub, ast.Call):
+                            cname = _get_call_name(sub).lower()
+                            if any(cname.startswith(p) for p in ("requests.", "httpx.", "urllib.", "gateway.")):
+                                if external_call_lineno is None:
+                                    external_call_lineno = stmt_lineno
+                                    break
+
+                    # Find subsequent idempotency check or registration
+                    if external_call_lineno is not None and stmt_lineno > external_call_lineno:
+                        if isinstance(stmt, ast.If):
+                            test_str = ast.unparse(stmt.test).lower() if hasattr(ast, "unparse") else ""
+                            if any(term in test_str for term in ("processed", "seen", "existing", "duplicate", "history", "recorded")):
                                 idempotency_check_lineno = stmt_lineno
                                 break
+                        for sub in ast.walk(stmt):
+                            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+                                attr_name = sub.func.attr
+                                caller_name = ast.unparse(sub.func.value).lower() if hasattr(ast, "unparse") else ""
+                                if attr_name in ("add", "append", "insert") and any(term in caller_name for term in ("processed", "seen", "transactions", "records")):
+                                    idempotency_check_lineno = stmt_lineno
+                                    break
 
-            if external_call_lineno and idempotency_check_lineno:
-                target_line = idempotency_check_lineno if self._line_in_diff(idempotency_check_lineno) else (
-                    external_call_lineno if self._line_in_diff(external_call_lineno) else getattr(node, "lineno", 0)
-                )
-                self._add_finding(
-                    lineno=target_line,
-                    title="Race condition and duplicate processing: external operation executed before idempotency check",
-                    category="bug",
-                    severity="high",
-                    description="External operation (HTTP request / refund webhook) is dispatched before checking and recording idempotency state in `self.processed_transactions`.",
-                    impact="Concurrent or repeated requests can trigger multiple duplicate refunds before the transaction is registered as processed.",
-                    recommendation="Check idempotency state and register the transaction before initiating external operations.",
-                    suggested_fix=None,
-                    confidence=0.85,
-                )
+                if external_call_lineno and idempotency_check_lineno:
+                    target_line = idempotency_check_lineno if self._line_in_diff(idempotency_check_lineno) else (
+                        external_call_lineno if self._line_in_diff(external_call_lineno) else getattr(node, "lineno", 0)
+                    )
+                    self._add_finding(
+                        lineno=target_line,
+                        title="Race condition and duplicate processing: external operation executed before idempotency check",
+                        category="bug",
+                        severity="high",
+                        description="External operation (HTTP request / refund webhook) is dispatched before checking and recording idempotency state in `self.processed_transactions`.",
+                        impact="Concurrent or repeated requests can trigger multiple duplicate refunds before the transaction is registered as processed.",
+                        recommendation="Check idempotency state and register the transaction before initiating external operations.",
+                        suggested_fix=None,
+                        confidence=0.85,
+                    )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         # Push isolated function scope for local variable tracking
@@ -620,31 +625,40 @@ class PythonASTSecurityVisitor(ast.NodeVisitor):
                 elif isinstance(url_arg, ast.Constant) and isinstance(url_arg.value, str):
                     url_str = ""
                 if any(w in url_str for w in ("url", "dest", "target", "endpoint", "webhook", "callback", "redirect")):
-                    self._add_finding(
-                        lineno=lineno,
-                        title="Potential Server-Side Request Forgery (SSRF)",
-                        category="security",
-                        severity="high",
-                        description=f"HTTP request dispatched to dynamic destination URL ('{url_arg.id if isinstance(url_arg, ast.Name) else 'url'}') without validation or IP allowlisting.",
-                        impact="Attackers can provide internal network URLs (e.g. 169.254.169.254 or localhost) to access cloud metadata or intranet services.",
-                        recommendation="Validate destination URLs against an allowlist of approved domains and block loopback/private IP ranges.",
-                        suggested_fix=None,
-                        confidence=0.80,
-                    )
+                    fn_source = self.full_source.lower()
+                    has_url_validation = any(k in fn_source for k in ("allowlist", "whitelist", "validate_url", "is_safe_url", "allowed_hosts", "allowed_domains"))
+                    if not has_url_validation:
+                        self._add_finding(
+                            lineno=lineno,
+                            title="Potential Server-Side Request Forgery (SSRF)",
+                            category="security",
+                            severity="high",
+                            description=f"HTTP request dispatched to dynamic destination URL ('{url_arg.id if isinstance(url_arg, ast.Name) else 'url'}') without validation or IP allowlisting.",
+                            impact="Attackers can provide internal network URLs (e.g. 169.254.169.254 or localhost) to access cloud metadata or intranet services.",
+                            recommendation="Validate destination URLs against an allowlist of approved domains and block loopback/private IP ranges.",
+                            suggested_fix=None,
+                            confidence=0.80,
+                        )
 
         # 9. Path traversal via open(f"...") or open(variable_path)
-        if call_name == "open" and node.args and self._line_in_diff(lineno):
+        file_sink_names = {"open", "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree", "pathlib.Path", "Path"}
+        is_file_sink = (call_name in file_sink_names) or (
+            isinstance(node.func, ast.Attribute) and node.func.attr in ("open", "read_bytes", "read_text", "write_bytes", "write_text")
+        )
+        if is_file_sink and node.args:
             path_arg = node.args[0]
             is_path_traversal = False
             reported_line = lineno
-            if isinstance(path_arg, ast.JoinedStr):
+            if isinstance(path_arg, ast.JoinedStr) and self._line_in_diff(lineno):
                 line_text = self.added_lines.get(lineno, "")
                 if "/" in line_text or "\\" in line_text:
                     is_path_traversal = True
             elif isinstance(path_arg, ast.Name) and path_arg.id in self.dynamic_path_vars:
                 assign_lineno, _ = self.dynamic_path_vars[path_arg.id]
-                if not any(f.line == assign_lineno and "path traversal" in f.title.lower() for f in self.findings):
-                    is_path_traversal = True
+                if self._line_in_diff(lineno) or self._line_in_diff(assign_lineno):
+                    reported_line = assign_lineno if self._line_in_diff(assign_lineno) else lineno
+                    if not any(f.line == reported_line and "path traversal" in f.title.lower() for f in self.findings):
+                        is_path_traversal = True
 
             if is_path_traversal:
                 self._add_finding(
